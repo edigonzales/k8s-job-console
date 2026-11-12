@@ -66,6 +66,8 @@ spec:
             - --request-logging=false
             - --cookie-secure=false
             - --cookie-expire=5m
+            - --cookie-csrf-per-request=true
+            - --cookie-csrf-per-request-limit=8
             - --code-challenge-method=S256
             - --upstream=static://202
           envFrom: [{secretRef: {name: job-console-oauth2-proxy}}]

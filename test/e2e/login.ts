@@ -14,10 +14,11 @@ function password(user: User): string {
   return value;
 }
 
-export async function signIn(page: Page, user: User) {
+export async function signIn(page: Page, user: User, beforeSubmit?: () => Promise<void>) {
   await page.goto(local + '/');
   await page.locator('#username').fill(user);
   await page.locator('#password').fill(password(user));
+  await beforeSubmit?.();
   await page.locator('#kc-login').click();
   await expect(page.getByRole('heading', { name: 'Jobs', exact: true })).toBeVisible({ timeout: 30_000 });
 }

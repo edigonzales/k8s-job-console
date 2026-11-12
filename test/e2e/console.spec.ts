@@ -240,3 +240,19 @@ test('an expired browser session returns to the configured OIDC login', async ({
   await context.addCookies(cookies.map(cookie => ({ ...cookie, expires: Math.floor(Date.now() / 1000) + 1 })));
   await expect(page.locator('#password')).toBeVisible({ timeout: 30_000 });
 });
+
+test('reviewer login survives another Headlamp request in the same browser session', async ({ browser }) => {
+  const page = await browser.newPage();
+  try {
+    await signIn(page, 'reviewer', async () => {
+      const background = await page.request.get('/config', { maxRedirects: 0 });
+      expect(background.status()).toBe(302);
+    });
+    const response = await page.request.get(apiRoot + '/me');
+    expect(await response.json()).toMatchObject({ displayName: 'reviewer', canApprove: true });
+    await page.getByRole('navigation', { name: 'Navigation' }).getByRole('button', { name: 'Freigaben' }).click();
+    await expect(page.getByRole('heading', { name: 'Freigaben', exact: true })).toBeVisible();
+  } finally {
+    await page.close();
+  }
+});
