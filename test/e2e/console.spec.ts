@@ -216,7 +216,8 @@ test('administrator pauses a schedule and the pause survives synchronization and
     const sync = await result.json();
     await expect.poll(async () => (await (await page.request.get(apiRoot + '/synchronizations/' + sync.name)).json()).status,
       { timeout: 90_000 }).toBe('Succeeded');
-    const launcherUID = () => kubectl('get', 'pod', '-l', 'app=launcher', '-o', 'jsonpath={.items[0].metadata.uid}');
+    const launcherUID = () => kubectl('get', 'pod', '-l', 'app=launcher', '-o',
+      'jsonpath={.items[?(@.status.phase=="Running")].metadata.uid}');
     const previous = launcherUID();
     expect(previous).not.toBe('');
     kubectl('rollout', 'restart', 'deployment/launcher');
