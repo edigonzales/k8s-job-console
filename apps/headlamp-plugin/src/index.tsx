@@ -314,14 +314,24 @@ function ApprovalForm({ approval, path, refresh }: { approval: Approval; path: s
 }
 
 function Approvals() {
-  const state = useApi<{ name: string; jobId: string; step: string; message: string; canDecide: boolean }[]>('/approvals', 4000);
-  const jobs = useApi<Job[]>('/jobs');
-  return <Page title="Freigaben"><Load state={state}>{items => <Rows headers={['Ablauf', 'Anforderung', 'Ausführung']}
-    empty="Keine offenen Freigaben." rows={items.map(item => ({
-      key: item.name + ':' + item.step,
-      cells: [jobs.data?.find(job => job.id === item.jobId)?.name ?? item.jobId, item.message,
-        <Link to={runLink(item.name)}>{item.name}</Link>],
-    }))} />}</Load></Page>;
+  const account = useApi<Account>('/me', 4000);
+  const state = useApi<(Approval & {
+    name: string; jobName: string; starterName?: string; started?: string; revision?: string; scheduled: boolean;
+    files: Pick<ResultFile, 'id' | 'label' | 'name'>[];
+  })[]>(account.data?.canApprove ? '/approvals' : undefined, 4000);
+  return <Page title="Freigaben"><Load state={account}>{user => user.canApprove ?
+    <Load state={state}>{items => items.length ? items.map(item => {
+      const path = '/runs/' + encodeURIComponent(item.name);
+      return <Stack key={item.name + ':' + item.step} spacing={1}>
+        <Typography variant="h6">{item.jobName} · <Link to={runLink(item.name)}>{item.name}</Link></Typography>
+        <Typography variant="body2">{item.starterName ?? (item.scheduled ? 'Zeitplan' : '–')} · {date(item.started)}</Typography>
+        <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>Git {item.revision}</Typography>
+        {item.files.map(file => <Button key={file.id} component="a" sx={{ alignSelf: 'flex-start' }}
+          href={prefix + path + '/artifacts/' + encodeURIComponent(file.id)}>{file.label} · {file.name}</Button>)}
+        <ApprovalForm approval={item} path={path} refresh={state.refresh} />
+      </Stack>;
+    }) : <Typography color="text.secondary">Keine offenen Freigaben.</Typography>}</Load> :
+    <Alert severity="info">Dieses Konto hat keine Freigaberechte.</Alert>}</Load></Page>;
 }
 
 function RunDetails() {
@@ -425,11 +435,11 @@ function Schedules() {
     finally { setBusy(''); }
   }
   return <Page title="Zeitpläne">{error && <Alert severity="error">{error}</Alert>}<Load state={state}>{data => <Rows
-    headers={['Job', 'Cron', 'Aufgelöst', 'Zeitzone', 'Status', 'Letzter Start', 'Aktion']}
+    headers={['Job', 'Cron', 'Aufgelöst', 'Zeitzone', 'Status', 'Letzter Start', 'Nächster Start', 'Aktion']}
     empty="Keine geplanten Jobs."
     rows={data.map(item => ({ key: item.id, cells: [<Link to={jobLink(item.id)}>{item.name}</Link>,
       item.cron, item.resolvedCron, item.timeZone, item.active === null ? 'Nicht bereitgestellt' : item.active ? 'Aktiv' : 'Suspendiert',
-      date(item.lastSchedule), item.canManage && item.active !== null &&
+      date(item.lastSchedule), date(item.nextSchedule), item.canManage && item.active !== null &&
         <Button disabled={Boolean(busy)} onClick={() => change(item)}>{item.active ? 'Pausieren' : 'Aktivieren'}</Button>] }))} />}</Load></Page>;
 }
 
@@ -442,7 +452,8 @@ interface SyncStatus {
 }
 
 function Synchronizations() {
-  const state = useApi<SyncStatus>('/synchronizations', 4000);
+  const account = useApi<Account>('/me', 4000);
+  const state = useApi<SyncStatus>(account.data?.admin ? '/synchronizations' : undefined, 4000);
   const [ref, setRef] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -459,7 +470,8 @@ function Synchronizations() {
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   }
-  return <Page title="Bereitstellung"><Load state={state}>{data => <>
+  return <Page title="Bereitstellung"><Load state={account}>{user => user.admin ?
+    <Load state={state}>{data => <>
     <Typography>{data.repository}</Typography>
     {data.active && <Typography sx={{ overflowWrap: 'anywhere' }}>
       {data.active.ref} · {data.active.revision}
@@ -482,7 +494,7 @@ function Synchronizations() {
     {selected && <Load state={details}>{result => result.logs &&
       <Paper component="pre" sx={{ p: 2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{result.logs}</Paper>
     }</Load>}
-  </>}</Load></Page>;
+  </>}</Load> : <Alert severity="info">Dieses Konto darf die Bereitstellung nicht verwalten.</Alert>}</Load></Page>;
 }
 
 const sidebar = 'HOME';

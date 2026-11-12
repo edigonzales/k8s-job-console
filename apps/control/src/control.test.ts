@@ -100,6 +100,7 @@ test('generator writes deterministic manifests and rejects symlink scripts', asy
     await writeFile(join(dir, 'jobs/hello/job.groovy'), 'println "hello"');
     const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
     git('init');
+    await writeFile(join(dir, '.git/info/exclude'), '/one/\n/two/\n');
     const commit = () => {
       git('add', 'jobs');
       git('-c', 'user.name=Test', '-c', 'user.email=test@example.org', 'commit', '-m', 'fixture');
@@ -112,6 +113,9 @@ test('generator writes deterministic manifests and rejects symlink scripts', asy
     for (const file of ['catalog.json', 'catalog-configmap.yaml', 'workflowtemplates.yaml', 'cronworkflows.yaml']) {
       assert.deepEqual(await readFile(join(dir, 'one', file)), await readFile(join(dir, 'two', file)));
     }
+    await writeFile(join(dir, 'shared.sql'), 'select 1');
+    assert.throws(() => generate('dirty'), /Commit all job definitions and code/);
+    await rm(join(dir, 'shared.sql'));
     await rm(join(dir, 'jobs/hello/job.groovy'));
     const { symlink } = await import('node:fs/promises');
     await symlink(join(dir, 'jobs/hello/job.yaml'), join(dir, 'jobs/hello/job.groovy'));

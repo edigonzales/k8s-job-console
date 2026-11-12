@@ -15,7 +15,7 @@ const jobsDir = values['jobs-dir']!;
 const git = (...args: string[]) => execFileSync('git', args, { cwd: jobsDir, encoding: 'utf8' }).trim();
 const revision = git('rev-parse', 'HEAD');
 if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error('Expected a full Git commit');
-if (git('status', '--porcelain', '--untracked-files=all', '--', 'jobs', 'flows')) {
+if (git('status', '--porcelain', '--untracked-files=all')) {
   throw new Error('Commit all job definitions and code before generating workflows');
 }
 await validateGitTree(jobsDir, git);

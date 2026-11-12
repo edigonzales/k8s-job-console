@@ -51,6 +51,9 @@ test('a separate reviewer approves the pinned CSV and the decision survives rest
   try {
     await signIn(reviewer, 'reviewer');
     await reviewer.goto(base + '/job-console/approvals');
+    await expect(reviewer.getByText('admin ·', { exact: false })).toBeVisible({ timeout: 30_000 });
+    await expect(reviewer.getByRole('link', { name: 'Prüfbericht · review.json' })).toBeVisible();
+    await expect(reviewer.getByLabel('Publikationshinweis')).toBeVisible();
     await reviewer.getByRole('link', { name, exact: true }).click();
     await expect(reviewer.getByText('Prüfbericht · review.json')).toBeVisible();
     await reviewer.getByLabel('Publikationshinweis').fill(approve.values.publicationNote);

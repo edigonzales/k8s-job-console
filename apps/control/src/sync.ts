@@ -64,7 +64,8 @@ export async function sync(ref: string) {
     const revision = git('rev-parse', 'HEAD');
     await writeFile('/tmp/source-revision', revision);
     await validateGitTree(checkout, git);
-    const generated = await generateResources(checkout, { repository, image, revision, ref, notifierImage, notifierSecret, gitSecret: authenticated ? 'job-console-git' : undefined }, ref !== main);
+    const generated = await generateResources(checkout, { repository, image, revision, ref, notifierImage, notifierSecret,
+      localPodSecurity: process.env.GRETL_LOCAL_POD_SECURITY === 'true' || undefined, gitSecret: authenticated ? 'job-console-git' : undefined }, ref !== main);
     const templates = resource('workflowtemplates');
     const crons = resource('cronworkflows');
     for (const template of generated.templates) {

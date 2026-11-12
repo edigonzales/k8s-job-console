@@ -23,6 +23,7 @@ export interface Source {
   gitSecret?: string;
   notifierImage?: string;
   notifierSecret?: string;
+  localPodSecurity?: boolean;
 }
 
 export type CatalogJob = Job & { source: Source; successor?: Job; kind?: 'job' };
@@ -202,7 +203,8 @@ export function workflow(entry: CatalogEntry, name: string | undefined, values: 
       synchronization: entry.kind === 'flow' && entry.execution.serial ? { mutexes: [{ name: 'flow-' + entry.id }] } : undefined,
       ttlStrategy: { secondsAfterCompletion: 604800 },
       artifactRepositoryRef: { configMap: 'job-console-artifacts', key: 'rustfs' },
-      securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001,
+      securityContext: { runAsNonRoot: true,
+        ...(entry.source.localPodSecurity ? { runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001 } : {}),
         seccompProfile: { type: 'RuntimeDefault' } },
       volumes: [
         ...workDirectories.map(name => ({ name, emptyDir: {} })),

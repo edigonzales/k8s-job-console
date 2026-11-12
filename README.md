@@ -42,6 +42,11 @@ Test-Sitzungen und Access Tokens laufen nach fünf Minuten ab.
 Für eine Installation ausserhalb der lokalen Entwicklung setzt der
 Launcher HTTPS-Origins, HTTPS-Issuer und HTTPS-JWKS voraus. Die
 lokale Keycloak-Konfiguration und Branch-Vorschau bleiben dort deaktiviert.
+Die Manifeste unter `deploy/` beschreiben Rancher Desktop. Der lokale
+Seeder setzt `GRETL_LOCAL_POD_SECURITY=true` für die numerische UID/GID
+der lokalen Runtime. Ohne diese lokale Einstellung übernimmt die
+Zielplattform UID und GID des Workflow-Pods. OpenShift wurde nicht
+abgenommen.
 
 `dev-up.sh` baut das generische GRETL-Image aus dem Runtime-Checkout und
 kennzeichnet den lokalen Build mit seiner Image-ID. Der offizielle
@@ -84,7 +89,11 @@ Dateiupload mit höchstens 512 MiB pro Datei und 1 GiB pro Ausführung.
 RustFS bewahrt Eingaben und Ergebnisse standardmässig 30 Tage auf.
 Zugangsdaten liegen im Kubernetes Secret. GRETL erhält Parameter über
 die native JSON-Parameterdatei, Eingaben unter `/inputs` und
-systemgesetzte Ausgabepfade unter `/outputs`.
+systemgesetzte Ausgabepfade unter `/outputs`. Administrierende können
+die Grenzen `GRETL_MAX_CPU_MILLICORES` und `GRETL_MAX_MEMORY_MIB`
+im Seeder oder für den lokalen Generator setzen. Die lokalen
+Standardwerte sind 2’000 Millicores und 2’048 MiB. Das administrativ
+freigegebene Job-Repository enthält vertrauenswürdigen Groovy-Code.
 
 Serielle Jobs verwenden einen Argo-Mutex je stabiler Job-ID. Manuelle und
 geplante Läufe teilen dieselbe Sperre. Lokale Mutexes setzen einen aktiven
@@ -94,6 +103,8 @@ verfügbare Ergebnisdateien. **Abbrechen** terminiert über Argo.
 **Wiederholen** startet einen neuen Lauf mit dem aktuellen Katalogstand.
 Dateieingaben werden für den neuen Lauf unter einem eigenen RustFS-Schlüssel
 kopiert. Die aktuell gültigen Startrechte und Eingaben werden erneut geprüft.
+Nach einem Revisionswechsel wählst du Dateieingaben über das aktuelle
+Startformular aus.
 Freigaben beginnen wieder offen. Zeitplanpausen bleiben bei Git-Synchronisationen
 erhalten. Beim Entfernen eines Zeitplans laufen bereits angelegte Workflows weiter.
 

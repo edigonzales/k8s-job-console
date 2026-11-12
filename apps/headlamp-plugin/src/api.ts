@@ -33,6 +33,7 @@ export interface Schedule {
   active: boolean | null;
   canManage: boolean;
   lastSchedule?: string;
+  nextSchedule?: string;
 }
 export interface Approval {
   step: string;

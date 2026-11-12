@@ -1,7 +1,7 @@
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
 import { S3Client, GetObjectCommand, CreateBucketCommand, HeadBucketCommand, HeadObjectCommand, CopyObjectCommand, DeleteObjectCommand,
-  PutBucketLifecycleConfigurationCommand } from '@aws-sdk/client-s3';
+  GetBucketLifecycleConfigurationCommand, PutBucketLifecycleConfigurationCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 
 const MiB = 1024 ** 2;
@@ -69,11 +69,25 @@ export function storage() {
       }
       const days = Number(process.env.S3_RETENTION_DAYS ?? 30);
       if (!Number.isInteger(days) || days < 30) throw new Error('Invalid S3_RETENTION_DAYS');
+      const existing = await client.send(new GetBucketLifecycleConfigurationCommand({ Bucket: bucket }))
+        .catch(error => {
+          if (error.name === 'NoSuchLifecycleConfiguration') return { Rules: [] };
+          throw error;
+        });
+      const rules = existing.Rules ?? [];
+      const managed = { 'expire-run-inputs': 'runs/', 'expire-runs': 'runs/', 'expire-artifacts': 'artifacts/' };
+      const isManaged = (rule: typeof rules[number]) =>
+        Object.hasOwn(managed, rule.ID ?? '') && managed[rule.ID as keyof typeof managed] === rule.Filter?.Prefix;
       await client.send(new PutBucketLifecycleConfigurationCommand({
-        Bucket: bucket, LifecycleConfiguration: { Rules: ['runs/', 'artifacts/'].map(prefix => ({
-          ID: 'expire-' + prefix.slice(0, -1), Status: 'Enabled' as const, Filter: { Prefix: prefix },
-          Expiration: { Days: days }, AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
-        })) },
+        Bucket: bucket, LifecycleConfiguration: { Rules: [
+          ...rules.filter(rule => !isManaged(rule)),
+          ...['runs/', 'artifacts/'].map(prefix => ({
+            ID: 'expire-' + prefix.slice(0, -1), Status: 'Enabled' as const, Filter: { Prefix: prefix },
+            Expiration: { Days: Math.max(days, ...rules.filter(rule => isManaged(rule) && rule.Filter?.Prefix === prefix)
+              .map(rule => rule.Expiration?.Days ?? 0)) },
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
+          })),
+        ] },
       }));
     },
   };

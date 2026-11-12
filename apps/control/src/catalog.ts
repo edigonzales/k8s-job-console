@@ -16,9 +16,17 @@ export const parameter = z.strictObject({
   options: z.array(z.strictObject({ value: z.string(), label: z.string().min(1) })).min(1).optional(),
 });
 
+function resourceLimit(name: string, fallback: number) {
+  const limit = Number(process.env[name] ?? fallback);
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error(`Invalid ${name}`);
+  return limit;
+}
+
 const quantities = z.strictObject({
-  cpu: z.string().regex(/^(?:[1-9]\d{0,3}m|[1-2])$/).refine(v => !v.endsWith('m') || parseInt(v) <= 2000),
-  memory: z.string().regex(/^(?:[1-9]\d{0,3}Mi|[1-2]Gi)$/).refine(v => !v.endsWith('Mi') || parseInt(v) <= 2048),
+  cpu: z.string().regex(/^[1-9]\d*m?$/).refine(value =>
+    Number.parseInt(value, 10) * (value.endsWith('m') ? 1 : 1000) <= resourceLimit('GRETL_MAX_CPU_MILLICORES', 2000)),
+  memory: z.string().regex(/^[1-9]\d*(?:Mi|Gi)$/).refine(value =>
+    Number.parseInt(value, 10) * (value.endsWith('Gi') ? 1024 : 1) <= resourceLimit('GRETL_MAX_MEMORY_MIB', 2048)),
 });
 
 const grant = z.strictObject({
@@ -59,7 +67,7 @@ export const definition = z.strictObject({
   outputs: z.array(output).max(32).default([]),
   execution: execution.default({ serial: true, timeoutSeconds: 3600 }),
   parameters: z.array(parameter).max(32).default([]),
-  resources: quantities.default({ cpu: '250m', memory: '512Mi' }),
+  resources: quantities.prefault({ cpu: '250m', memory: '512Mi' }),
   schedule: z.strictObject({ cron: z.string(), timeZone: z.string().default('Europe/Zurich') }).optional(),
 });
 

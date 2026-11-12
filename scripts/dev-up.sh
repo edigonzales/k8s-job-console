@@ -50,13 +50,12 @@ fi
 k create configmap job-console-sync --dry-run=client -o yaml \
   --from-literal=JOBS_REPOSITORY="${JOBS_REPOSITORY:-https://github.com/edigonzales/gretl-runtime-jobs.git}" \
   --from-literal=JOBS_REF="${JOBS_REF:-feature/v2-job-console}" \
-  --from-literal=GRETL_IMAGE="$GRETL_IMAGE" --from-literal=NOTIFIER_IMAGE="$notifier_image" --from-literal=OIDC_DEV_MODE=true --from-literal=ALLOW_PREVIEW=true | k apply -f -
-if k get configmap job-console-catalog >/dev/null 2>&1; then
-  k label configmap job-console-catalog app.kubernetes.io/managed-by=job-console
-fi
+  --from-literal=GRETL_IMAGE="$GRETL_IMAGE" --from-literal=NOTIFIER_IMAGE="$notifier_image" \
+  --from-literal=GRETL_MAX_CPU_MILLICORES="${GRETL_MAX_CPU_MILLICORES:-2000}" \
+  --from-literal=GRETL_MAX_MEMORY_MIB="${GRETL_MAX_MEMORY_MIB:-2048}" \
+  --from-literal=GRETL_LOCAL_POD_SECURITY=true --from-literal=OIDC_DEV_MODE=true --from-literal=ALLOW_PREVIEW=true | k apply -f -
 k apply -f deploy/seeder.yaml
 ./scripts/deploy-jobs.sh
-k delete cronjobs.batch -l app.kubernetes.io/managed-by=job-console --cascade=orphan
 ./scripts/init-local-identity.sh
 k apply -f deploy/launcher.yaml -f deploy/headlamp.yaml
 k rollout restart deployment/launcher deployment/headlamp

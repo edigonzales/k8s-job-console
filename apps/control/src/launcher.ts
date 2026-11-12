@@ -3,6 +3,7 @@ import { extname } from 'node:path';
 import Fastify, { type FastifyRequest } from 'fastify';
 import multipart from '@fastify/multipart';
 import { CoreV1Api, CustomObjectsApi, KubeConfig, V1Pod } from '@kubernetes/client-node';
+import { CronExpressionParser } from 'cron-parser';
 import { validateValues } from './catalog.js';
 import { argoClient, type Artifact, type Node, type Workflow } from './argo.js';
 import { jobIdLabel, managedBy, workflow, parametersAnnotation, revisionAnnotation, imageAnnotation,
@@ -278,8 +279,11 @@ export async function buildApp(catalogSource: CatalogEntry[] | (() => Promise<Ca
     }) as { items: { metadata: { name: string }; spec?: { suspend?: boolean }; status?: { lastScheduledTime?: string } }[] };
     return (await catalog()).filter(job => job.schedule && permitted(request, 'view', job)).map(job => {
       const cron = schedules.items.find(item => item.metadata?.name === job.id);
-      return { id: job.id, name: job.name, ...job.schedule, resolvedCron: job.resolvedCron,
-        active: cron ? !cron.spec?.suspend : null, canManage: permitted(request, 'manage', job), lastSchedule: cron?.status?.lastScheduledTime };
+      const active = cron ? !cron.spec?.suspend : null;
+      const nextSchedule = active && job.resolvedCron && job.schedule ?
+        CronExpressionParser.parse(job.resolvedCron, { tz: job.schedule.timeZone }).next().toISOString() : undefined;
+      return { id: job.id, name: job.name, ...job.schedule, resolvedCron: job.resolvedCron, nextSchedule,
+        active, canManage: permitted(request, 'manage', job), lastSchedule: cron?.status?.lastScheduledTime };
     });
   });
 
@@ -472,12 +476,13 @@ export async function buildApp(catalogSource: CatalogEntry[] | (() => Promise<Ca
     const [jobs, result] = await Promise.all([catalog(), argo.list(selector)]);
     return (result.items ?? []).flatMap(run => {
       const entry = entryFor(jobs, run);
-      if (!permitted(request, 'approve', entry) || runState(run).status !== 'AwaitingInput') return [];
-      return Object.entries(approvalDefinitions(run)).flatMap(([step, policy]) =>
-        approvalNode(run, step)?.phase === 'Running' ? [{
-          name: run.metadata.name, jobId: entry?.id, step, message: policy.message,
-          canDecide: canDecide(request, run, policy, entry),
-        }] : []);
+      if (!entry || !permitted(request, 'approve', entry) || runState(run).status !== 'AwaitingInput') return [];
+      const { name, starterName, started, revision, scheduled, approvals } = summary(run);
+      const files = artifacts(run).map(({ key: _key, ...file }) => file);
+      return approvals.filter(approval => approval.phase === 'Running').map(approval => ({
+        ...approval, name, jobName: entry.name, starterName, started, revision, scheduled, files,
+        canApprove: true, canDecide: canDecide(request, run, approval, entry),
+      }));
     });
   });
   app.post<{ Params: { name: string; step: string } }>('/api/runs/:name/approvals/:step/decision', async request => {
