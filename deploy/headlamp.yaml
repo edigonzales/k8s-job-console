@@ -1,0 +1,74 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headlamp
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: headlamp-proxy
+data:
+  default.conf: |
+    server {
+      listen 8080;
+      server_name localhost 127.0.0.1;
+      if ($host !~ "^(localhost|127\.0\.0\.1)$") { return 403; }
+      location /job-console-api/ {
+        client_max_body_size 1025m;
+        proxy_http_version 1.1;
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
+        proxy_pass http://launcher:8080/;
+      }
+      location / {
+        proxy_pass http://127.0.0.1:4466;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: headlamp
+spec:
+  selector:
+    matchLabels: {app: headlamp}
+  template:
+    metadata:
+      labels: {app: headlamp}
+    spec:
+      serviceAccountName: headlamp
+      containers:
+        - name: headlamp
+          image: job-console-headlamp:local
+          imagePullPolicy: Never
+          args: ["-in-cluster"]
+          readinessProbe:
+            tcpSocket: {port: 4466}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 101
+            capabilities: {drop: [ALL]}
+        - name: proxy
+          image: nginxinc/nginx-unprivileged:1.28-alpine
+          ports: [{containerPort: 8080}]
+          readinessProbe:
+            tcpSocket: {port: 8080}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: proxy, mountPath: /etc/nginx/conf.d, readOnly: true}
+      volumes:
+        - name: proxy
+          configMap: {name: headlamp-proxy}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: headlamp
+spec:
+  selector: {app: headlamp}
+  ports: [{port: 8080}]

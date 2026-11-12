@@ -1,0 +1,41 @@
+name: Console build and tests
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: k8s-job-console
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            k8s-job-console/package-lock.json
+            k8s-job-console/apps/headlamp-plugin/package-lock.json
+      - name: Install and test
+        working-directory: k8s-job-console
+        run: |
+          npm ci
+          npm test
+          npm --prefix apps/headlamp-plugin ci
+          npm --prefix apps/headlamp-plugin run check
+          npm run plugin
+      - name: Validate example definitions and manifests
+        working-directory: k8s-job-console
+        run: |
+          git clone https://github.com/edigonzales/gretl-runtime-jobs.git ../gretl-runtime-jobs
+          if [[ ! -d ../gretl-runtime-jobs/jobs ]]; then
+            git -C ../gretl-runtime-jobs switch feature/mvp-k8s-job-console
+          fi
+          npm run generate
+          docker run --rm -v "$PWD:/work:ro" ghcr.io/yannh/kubeconform:v0.7.0 \
+            -strict -kubernetes-version 1.35.0 /work/deploy /work/build/generated/scripts.yaml /work/build/generated/cronjobs.yaml /work/build/generated/catalog-configmap.yaml
+      - name: Build images
+        working-directory: k8s-job-console
+        run: |
+          docker build -f apps/control/Dockerfile .
+          docker build apps/headlamp-plugin

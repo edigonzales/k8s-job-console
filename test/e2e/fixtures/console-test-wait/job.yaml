@@ -1,0 +1,6 @@
+schemaVersion: 1
+id: console-test-wait
+name: E2E Wartejob
+description: Wartet für den Abbruchtest.
+runtime: gretl
+script: job.groovy

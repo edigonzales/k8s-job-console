@@ -1,0 +1,41 @@
+{
+  "name": "k8s-job-console",
+  "version": "1.0.0",
+  "description": "Kubernetes Job Console for GRETL",
+  "scripts": {
+    "test": "npm run build && node --test build/control/*.test.js",
+    "build": "tsc -p tsconfig.json",
+    "generate": "node build/control/generate.js",
+    "start": "node build/control/launcher.js",
+    "plugin": "npm --prefix apps/headlamp-plugin run build",
+    "test:ui": "playwright test"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edigonzales/k8s-job-console.git"
+  },
+  "license": "Apache-2.0",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/edigonzales/k8s-job-console/issues"
+  },
+  "homepage": "https://github.com/edigonzales/k8s-job-console#readme",
+  "engines": {
+    "node": "22.x"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "3.1167.0",
+    "@aws-sdk/lib-storage": "3.1167.0",
+    "@fastify/multipart": "10.1.8",
+    "@kubernetes/client-node": "2.0.2",
+    "cron-parser": "5.10.5",
+    "fastify": "5.12.8",
+    "yaml": "2.9.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/node": "22.20.5",
+    "typescript": "7.0.2"
+  }
+}

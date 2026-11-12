@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: init-storage-
+spec:
+  ttlSecondsAfterFinished: 300
+  activeDeadlineSeconds: 90
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: init-storage
+          image: job-console-control:local
+          imagePullPolicy: Never
+          args: [init-storage]
+          envFrom:
+            - configMapRef: {name: job-console-storage}
+            - secretRef: {name: job-console-storage}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
