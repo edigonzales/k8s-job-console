@@ -229,5 +229,5 @@ test('an expired browser session returns to the configured OIDC login', async ({
   const cookies = (await context.cookies()).filter(cookie => cookie.name.startsWith('_oauth2_proxy'));
   expect(cookies.length).toBeGreaterThan(0);
   await context.addCookies(cookies.map(cookie => ({ ...cookie, expires: Math.floor(Date.now() / 1000) + 1 })));
-  await expect(page.locator('#username')).toBeVisible({ timeout: 30_000 });
+  await expect(page.locator('#password')).toBeVisible({ timeout: 30_000 });
 });
