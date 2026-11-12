@@ -94,6 +94,24 @@ verfügbare Ergebnisdateien. **Abbrechen** terminiert über Argo.
 **Wiederholen** startet einen neuen Lauf mit dem aktuellen Katalogstand.
 Bei Dateieingaben führt der Link zurück zum Startformular.
 
+## Folgejobs und Freigaben
+
+`onSuccess.job` fügt einen direkten Folgejob in denselben Argo-Workflow
+ein. Der Folgejob startet nach Erfolg und verwendet dieselbe Git-Revision.
+Lineare Abläufe liegen in `flows/<id>/flow.yaml`. Sie verbinden Jobschritte
+und native Argo-Suspend-Schritte. Eingaben können aus Startwerten,
+deklarierten Artefakten, Freigabefeldern oder Konstanten stammen.
+
+Für **CSV prüfen und veröffentlichen** lädt der Operator
+`gretl-runtime-jobs/testdata/publication.csv` hoch. Der Reviewer öffnet
+den Prüfbericht unter **Freigaben**, gibt einen Publikationshinweis ein
+und entscheidet. Bei Freigabe stammen die publizierte Datei und der
+Hinweis aus genau diesem Lauf. Der wartende Suspend-Schritt braucht
+keinen GRETL-Pod. Job-Mutexe gelten für dieselben Job-IDs über alle
+Startarten und Quellrevisionen. Eine separate Ablauf-Sperre schützt
+serielle Abläufe während der Freigabewartezeit. Gemeinsame Datenbestände
+aus realen Fachsystemen brauchen eine passende fachliche Isolation.
+
 ## Tests und Fehlerdiagnose
 
 ```sh

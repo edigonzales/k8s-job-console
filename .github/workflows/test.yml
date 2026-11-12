@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: edigonzales/gretl-runtime-jobs
-          ref: 35afdfaf264c9b0b51785121a1a446eeaef2d660
+          ref: 2e386eaccee9309e01d16c07bff939afa43830e4
           path: gretl-runtime-jobs
       - name: Validate example definitions and manifests
         working-directory: k8s-job-console

@@ -1,5 +1,6 @@
 import type { Workflow, Artifact } from './argo.js';
 import { type Job, type Values, validateValues } from './catalog.js';
+import type { Approval, Flow } from './flows.js';
 import { inputKey } from './storage.js';
 
 export const managedBy = 'app.kubernetes.io/managed-by';
@@ -10,6 +11,9 @@ export const imageAnnotation = 'job-console.io/runtime-image';
 export const parametersAnnotation = 'job-console.io/parameters';
 export const triggerAnnotation = 'job-console.io/trigger';
 export const outputLabelsAnnotation = 'job-console.io/output-labels';
+export const inputFilesAnnotation = 'job-console.io/input-files';
+export const approvalsAnnotation = 'job-console.io/approvals';
+export const templateAnnotation = 'job-console.io/template';
 
 export interface Source {
   repository: string;
@@ -19,58 +23,151 @@ export interface Source {
   gitSecret?: string;
 }
 
-export type CatalogJob = Job & { source: Source };
+export type CatalogJob = Job & { source: Source; successor?: Job; kind?: 'job' };
+export type CatalogFlow = Flow & { source: Source; jobs: Job[]; kind: 'flow'; exposed: true; runtime: 'gretl' };
+export type CatalogEntry = CatalogJob | CatalogFlow;
 
-export const templateAnnotation = 'job-console.io/template';
-export function templateName(job: CatalogJob) {
+export function templateName(job: CatalogEntry) {
   const imageVersion = job.source.image.split(':').pop()!.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 12);
   return `${job.id}-${job.source.revision.slice(0, 12)}-${imageVersion}`.replace(/-+$/g, '');
 }
 
 const restricted = {
-  allowPrivilegeEscalation: false,
-  readOnlyRootFilesystem: true,
-  capabilities: { drop: ['ALL'] },
+  allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: { drop: ['ALL'] },
 };
 const workDirectories = ['work', 'tmp', 'reports', 'outputs', 'run'];
 
-function parametersFile(job: Job, values: Values, files: string[]) {
-  const strings = {
-    ...values,
-    ...Object.fromEntries(files.map(name => [name, '/inputs/' + name])),
-    ...Object.fromEntries(job.outputs.map(output => [output.parameter, '/outputs/' + output.path])),
+export const encodeParameter = (value: string | number | boolean) => JSON.stringify(String(value)).replaceAll('{', '\\u007b');
+export const approvalField = (name: string) => 'field-' + name;
+
+type Bindings = { values: Record<string, string>; artifacts: Artifact[] };
+function taskTemplate(job: Job, name: string, source: Source, bindings: Bindings, parameters: string[] = []) {
+  const values = { ...bindings.values };
+  for (const artifact of bindings.artifacts) values[artifact.name.slice('upload-'.length)] = encodeParameter(artifact.path!);
+  for (const output of job.outputs) values[output.parameter] = encodeParameter('/outputs/' + output.path);
+  const data = '{' + Object.entries(values).map(([name, value]) => JSON.stringify(name) + ':' + value).join(',') + '}';
+  return {
+    name,
+    synchronization: job.execution.serial ? { mutexes: [{ name: 'job-' + job.id }] } : undefined,
+    activeDeadlineSeconds: job.execution.timeoutSeconds,
+    inputs: {
+      artifacts: [
+        { name: 'source', path: '/source', git: {
+          repo: source.repository, revision: source.revision, disableSubmodules: true,
+          ...(source.gitSecret ? {
+            usernameSecret: { name: source.gitSecret, key: 'username' },
+            passwordSecret: { name: source.gitSecret, key: 'password' },
+          } : {}),
+        } },
+        { name: 'parameters', path: '/work/parameters.json', raw: { data } },
+        ...bindings.artifacts,
+      ],
+      ...(parameters.length ? { parameters: parameters.map(name => ({ name })) } : {}),
+    },
+    outputs: { artifacts: job.outputs.map(output => ({
+      name: output.name, path: '/outputs/' + output.path, optional: output.optional, archive: { none: {} },
+      s3: { key: `artifacts/{{workflow.name}}/{{pod.name}}/${output.name}` },
+    })) },
+    container: {
+      image: source.image,
+      imagePullPolicy: 'IfNotPresent',
+      command: ['/opt/gretl/bin/gretl'],
+      args: ['run', `/source/jobs/${job.id}/${job.script}`, '--config', '/config/runtime.json',
+        '--params-file', '/work/parameters.json', '--report', '/reports/report.json'],
+      resources: { requests: job.resources, limits: job.resources },
+      securityContext: restricted,
+      volumeMounts: [...workDirectories.map(name => ({ name, mountPath: '/' + name })),
+        { name: 'config', mountPath: '/config', readOnly: true }],
+    },
   };
-  // GRETL reads the original strings from JSON. Argo never sees delimiters
-  // from those strings and Kubernetes receives only the fixed file path.
-  return '{' + Object.entries(strings).map(([name, value]) =>
-    JSON.stringify(name) + ':' + JSON.stringify(String(value)).replaceAll('{', '\\u007b')).join(',') + '}';
 }
 
-export function workflow(job: CatalogJob, name: string | undefined, values: Values, files: string[], inputRun = name): Workflow {
-  const inputFiles: Artifact[] = files.map(field => ({
-    name: `upload-${field}`,
-    path: '/inputs/' + field,
-    s3: { key: inputKey(inputRun!, field) },
-  }));
+export function workflow(entry: CatalogEntry, name: string | undefined, values: Values, files: string[], inputRun = name): Workflow {
+  const uploaded = Object.fromEntries(files.map(field => [field, inputKey(inputRun!, field)]));
+  const outputLabels: Record<string, string> = {};
+  const approvals: Record<string, Approval> = {};
+  const steps: Record<string, unknown>[][] = [];
+  const templates: Record<string, unknown>[] = [];
+  const upload = (field: string, key?: string, optional?: boolean): Artifact => ({
+    name: 'upload-' + field, path: '/inputs/' + field, ...(key ? { s3: { key } } : {}), ...(optional ? { optional } : {}),
+  });
+  const encodeValues = (params: Values) => Object.fromEntries(Object.entries(params).map(([name, value]) => [name, encodeParameter(value)]));
+  function addTask(job: Job, step: string, bindings: Bindings, parameters: string[] = [], template = step) {
+    templates.push(taskTemplate(job, template, entry.source, bindings, parameters));
+    for (const output of job.outputs) outputLabels[`${step}.${output.name}`] = output.label;
+  }
+
+  if (entry.kind === 'flow') {
+    for (const step of entry.steps) {
+      if ('approval' in step) {
+        approvals[step.id] = step.approval;
+        templates.push({
+          name: 'step-' + step.id, suspend: {},
+          outputs: { parameters: ['decision', 'decidedBy', 'decidedByName', 'decidedAt', 'comment',
+            ...step.approval.fields.map(field => approvalField(field.name))]
+            .map(name => ({ name, valueFrom: { supplied: {} } })) },
+        });
+        steps.push([{ name: step.id, template: 'step-' + step.id }]);
+        continue;
+      }
+      const job = entry.jobs.find(job => job.id === step.job)!;
+      const bindings: Bindings = { values: {}, artifacts: [] };
+      const parameters: { name: string; value: string }[] = [];
+      const artifacts: { name: string; from: string; optional?: boolean }[] = [];
+      for (const target of job.parameters) {
+        const source = step.inputs[target.name];
+        const concrete = source && 'value' in source ? source.value
+          : source && 'fromInput' in source ? values[source.fromInput] ?? target.default : target.default;
+        if (concrete !== undefined && target.type !== 'file') bindings.values[target.name] = encodeParameter(concrete);
+        if (!source) continue;
+        if ('fromInput' in source && target.type === 'file' && Object.hasOwn(uploaded, source.fromInput)) {
+          bindings.artifacts.push(upload(target.name, uploaded[source.fromInput]));
+        } else if ('fromArtifact' in source) {
+          bindings.artifacts.push(upload(target.name, undefined, !target.required));
+          artifacts.push({ name: 'upload-' + target.name,
+            from: `{{steps.${source.fromArtifact.step}.outputs.artifacts.${source.fromArtifact.name}}}`,
+            optional: !target.required });
+        } else if ('fromApproval' in source) {
+          const name = 'arg-' + target.name;
+          parameters.push({ name, value: `{{steps.${source.fromApproval.step}.outputs.parameters.${approvalField(source.fromApproval.field)}}}` });
+          bindings.values[target.name] = `{{inputs.parameters.${name}}}`;
+        }
+      }
+      addTask(job, step.id, bindings, parameters.map(parameter => parameter.name), 'step-' + step.id);
+      steps.push([{ name: step.id, template: 'step-' + step.id, arguments: { parameters, artifacts } }]);
+    }
+  } else {
+    const bindings = { values: encodeValues(values), artifacts: files.map(field => upload(field, uploaded[field])) };
+    addTask(entry, 'process', bindings);
+    for (const output of entry.outputs) outputLabels[output.name] = output.label;
+    if (entry.successor) {
+      addTask(entry.successor, 'successor', { values: encodeValues(validateValues(entry.successor, {})), artifacts: [] });
+      steps.push([{ name: 'process', template: 'process' }], [{ name: 'successor', template: 'successor' }]);
+    }
+  }
+  if (steps.length) templates.unshift({ name: 'sequence', steps });
+
   return {
     apiVersion: 'argoproj.io/v1alpha1',
     kind: 'Workflow',
     metadata: {
-      name,
-      labels: { [managedBy]: 'job-console', [jobIdLabel]: job.id },
+      name, labels: { [managedBy]: 'job-console', [jobIdLabel]: entry.id },
       annotations: {
-        [revisionAnnotation]: job.source.revision,
-        [imageAnnotation]: job.source.image,
-        [templateAnnotation]: templateName(job),
+        [revisionAnnotation]: entry.source.revision,
+        [imageAnnotation]: entry.source.image,
+        [templateAnnotation]: templateName(entry),
         [parametersAnnotation]: JSON.stringify(values),
-        [outputLabelsAnnotation]: JSON.stringify(Object.fromEntries(job.outputs.map(output => [output.name, output.label]))),
+        [outputLabelsAnnotation]: JSON.stringify(outputLabels),
+        [inputFilesAnnotation]: JSON.stringify(uploaded),
+        [approvalsAnnotation]: JSON.stringify(approvals),
       },
     },
     spec: {
       automountServiceAccountToken: false,
       executor: { serviceAccountName: 'job-console-executor' },
-      entrypoint: 'process',
-      activeDeadlineSeconds: job.execution.timeoutSeconds,
+      entrypoint: steps.length ? 'sequence' : 'process',
+      activeDeadlineSeconds: entry.execution.timeoutSeconds,
+      synchronization: entry.kind === 'flow' && entry.execution.serial ? { mutexes: [{ name: 'flow-' + entry.id }] } : undefined,
       ttlStrategy: { secondsAfterCompletion: 604800 },
       artifactRepositoryRef: { configMap: 'job-console-artifacts', key: 'rustfs' },
       securityContext: { runAsNonRoot: true, runAsUser: 10001, runAsGroup: 10001, fsGroup: 10001,
@@ -79,41 +176,12 @@ export function workflow(job: CatalogJob, name: string | undefined, values: Valu
         ...workDirectories.map(name => ({ name, emptyDir: {} })),
         { name: 'config', configMap: { name: 'job-console-runtime' } },
       ],
-      templates: [{
-        name: 'process',
-        synchronization: job.execution.serial ? { mutexes: [{ name: 'job-' + job.id }] } : undefined,
-        inputs: { artifacts: [
-          { name: 'source', path: '/source', git: {
-            repo: job.source.repository, revision: job.source.revision, disableSubmodules: true,
-            ...(job.source.gitSecret ? {
-              usernameSecret: { name: job.source.gitSecret, key: 'username' },
-              passwordSecret: { name: job.source.gitSecret, key: 'password' },
-            } : {}),
-          } },
-          { name: 'parameters', path: '/work/parameters.json', raw: { data: parametersFile(job, values, files) } },
-          ...inputFiles,
-        ] },
-        outputs: { artifacts: job.outputs.map(output => ({
-          name: output.name, path: '/outputs/' + output.path, optional: output.optional, archive: { none: {} },
-          s3: { key: `artifacts/{{workflow.name}}/{{pod.name}}/${output.name}` },
-        })) },
-        container: {
-          image: job.source.image,
-          imagePullPolicy: 'IfNotPresent',
-          command: ['/opt/gretl/bin/gretl'],
-          args: ['run', `/source/jobs/${job.id}/${job.script}`, '--config', '/config/runtime.json',
-            '--params-file', '/work/parameters.json', '--report', '/reports/report.json'],
-          resources: { requests: job.resources, limits: job.resources },
-          securityContext: restricted,
-          volumeMounts: [...workDirectories.map(name => ({ name, mountPath: '/' + name })),
-            { name: 'config', mountPath: '/config', readOnly: true }],
-        },
-      }],
+      templates,
     },
   };
 }
 
-export function cronWorkflow(job: CatalogJob) {
+export function cronWorkflow(job: CatalogEntry) {
   const run = workflow(job, undefined, validateValues(job, {}), []);
   return {
     apiVersion: run.apiVersion,

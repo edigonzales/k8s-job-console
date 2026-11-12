@@ -7,7 +7,7 @@ import {
 } from '@kinvolk/headlamp-plugin/lib';
 import React, { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { Link, useHistory, useParams } from 'react-router-dom';
-import { api, prefix, type ResultFile, type Account, type Job, type JobDetail, launch, type Parameter, type Run, type Schedule, type Value } from './api';
+import { api, prefix, type ResultFile, type Account, type Approval, type Job, type JobDetail, launch, type Parameter, type Run, type Schedule, type Value } from './api';
 
 const root = '/job-console';
 const statuses = ['Pending', 'Queued', 'Running', 'AwaitingInput', 'Canceling', 'Succeeded', 'Failed', 'Canceled', 'Rejected'] as const;
@@ -82,14 +82,14 @@ function Jobs() {
   const jobs = useApi<Job[]>('/jobs');
   const runs = useApi<Run[]>('/runs', 5000);
   return <Page title="Jobs"><Load state={jobs}>{data => <Rows
-    headers={['Job', 'Runtime', 'Zeitplan', 'Letzte Ausführung', 'Aktion']}
+    headers={['Job', 'Art', 'Zeitplan', 'Letzte Ausführung', 'Aktion']}
     empty="Der Katalog enthält keine Jobs."
     rows={data.map(job => {
       const last = runs.data?.find(run => run.jobId === job.id);
       return { key: job.id, cells: [
         <><Typography component="div" fontWeight="medium">{job.name}</Typography>
           <Typography variant="body2" color="text.secondary">{job.description}</Typography></>,
-        job.runtime,
+        job.kind === 'flow' ? 'Ablauf' : 'Job',
         job.schedule ? <Link to={root + '/schedules'}>{job.schedule.cron}</Link> : '–',
         last ? <Link to={runLink(last.name)}><Status status={last.status} /></Link> : '–',
         <Button component={Link} to={jobLink(job.id)} variant="outlined"
@@ -214,7 +214,7 @@ function JobForm({ job }: { job: JobDetail }) {
       <LinearProgress aria-label="Startfortschritt" variant={progress === null || progress >= 100 ? 'indeterminate' : 'determinate'} value={progress ?? 0} />
     </Stack>}
     <Stack direction="row" spacing={1}>
-      <Button variant="contained" type="submit" disabled={busy}>Job starten</Button>
+      <Button variant="contained" type="submit" disabled={busy}>{job.kind === 'flow' ? 'Ablauf starten' : 'Job starten'}</Button>
       {uploading && <Button onClick={() => controller.current?.abort()}>Upload abbrechen</Button>}
     </Stack>
   </Stack>;
@@ -260,6 +260,62 @@ function Runs() {
           <Link to={runLink(run.name)}>{run.name}</Link>, date(run.started ?? run.created), <Status status={run.status} />, duration(run)],
       }))} />}</Load>
   </Page>;
+}
+
+function ApprovalForm({ approval, path, refresh }: { approval: Approval; path: string; refresh: () => void }) {
+  const [values, setValues] = useState<Record<string, Value>>(
+    Object.fromEntries(approval.fields.flatMap(field => field.default === undefined ? [] : [[field.name, field.default]])));
+  const [comment, setComment] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  async function submit(decision: 'approve' | 'reject') {
+    if (busy) return;
+    setBusy(true);
+    setError('');
+    try {
+      await api(path + '/approvals/' + encodeURIComponent(approval.step) + '/decision', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision, values, comment }),
+      });
+      refresh();
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  }
+  return <Paper variant="outlined" sx={{ p: 2 }}>
+    <Stack spacing={2}>
+      <Typography variant="h6" component="h2">Freigabe</Typography>
+      <Typography>{approval.message}</Typography>
+      {approval.decision && <Typography>
+        {approval.decision === 'approved' ? 'Freigegeben' : 'Abgelehnt'} · {approval.decidedBy} · {date(approval.decidedAt)}
+        {approval.comment && ' · ' + approval.comment}
+      </Typography>}
+      {approval.phase === 'Running' && approval.canApprove && !approval.canDecide &&
+        <Alert severity="info">Du hast diese Ausführung gestartet.</Alert>}
+      {approval.canDecide && <>
+        {error && <Alert severity="error">{error}</Alert>}
+        {approval.fields.map(field => <Field key={field.name} field={field} value={values[field.name]}
+          onValue={value => setValues(previous => ({ ...previous, [field.name]: value }))} onFile={() => {}} />)}
+        <TextField label="Kommentar" multiline required={approval.commentRequired} value={comment}
+          onChange={event => setComment(event.target.value)} />
+        <Stack direction="row" spacing={1}>
+          <Button variant="contained" disabled={busy} onClick={() => submit('approve')}>Freigeben</Button>
+          <Button color="error" variant="outlined" disabled={busy || !comment.trim()}
+            onClick={() => submit('reject')}>Ablehnen</Button>
+        </Stack>
+      </>}
+    </Stack>
+  </Paper>;
+}
+
+function Approvals() {
+  const state = useApi<{ name: string; jobId: string; step: string; message: string; canDecide: boolean }[]>('/approvals', 4000);
+  const jobs = useApi<Job[]>('/jobs');
+  return <Page title="Freigaben"><Load state={state}>{items => <Rows headers={['Ablauf', 'Anforderung', 'Ausführung']}
+    empty="Keine offenen Freigaben." rows={items.map(item => ({
+      key: item.name + ':' + item.step,
+      cells: [jobs.data?.find(job => job.id === item.jobId)?.name ?? item.jobId, item.message,
+        <Link to={runLink(item.name)}>{item.name}</Link>],
+    }))} />}</Load></Page>;
 }
 
 function RunDetails() {
@@ -322,6 +378,12 @@ function RunDetails() {
         <Typography component="dd" sx={{ ml: 2, whiteSpace: 'pre-wrap' }}>{String(value)}</Typography>
       </React.Fragment>)}
     </Box>}
+    {data.steps.length > 1 && <>
+      <Typography variant="h6" component="h2">Schritte</Typography>
+      <Rows headers={['Schritt', 'Status', 'Grund']} empty="" rows={data.steps.map(step => ({
+        key: step.id, cells: [step.name, step.status, step.reason ?? '–'],
+      }))} />
+    </>}
     <Load state={files}>{items => items.length > 0 && <>
       <Typography variant="h6" component="h2">Ergebnisdateien</Typography>
       <Rows headers={['Datei', 'Schritt', 'Grösse', 'Aktion']} empty="" rows={items.map(item => ({
@@ -332,6 +394,8 @@ function RunDetails() {
             : 'Nicht verfügbar'],
       }))} />
     </>}</Load>
+    {data.approvals?.map(approval => <ApprovalForm key={approval.step} approval={approval} path={path}
+      refresh={() => { run.refresh(); files.refresh(); logs.refresh(); }} />)}
     <Typography variant="h6" component="h2">Logs</Typography>
     <Load state={logs}>{result => result.logs ? <Paper component="pre" variant="outlined" tabIndex={0}
       sx={{ p: 2, m: 0, maxHeight: '55vh', overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
@@ -418,6 +482,7 @@ const sidebar = 'HOME';
 const pages = [
   { name: 'jobs', label: 'Jobs', path: root, icon: 'mdi:format-list-bulleted', component: Jobs },
   { name: 'runs', label: 'Ausführungen', path: root + '/runs', icon: 'mdi:play-circle-outline', component: Runs },
+  { name: 'approvals', label: 'Freigaben', path: root + '/approvals', icon: 'mdi:check-decagram-outline', component: Approvals },
   { name: 'deployment', label: 'Bereitstellung', path: root + '/deployment', icon: 'mdi:source-branch-sync', component: Synchronizations },
   { name: 'schedules', label: 'Zeitpläne', path: root + '/schedules', icon: 'mdi:calendar-clock', component: Schedules },
 ];
@@ -426,7 +491,8 @@ for (const page of pages) {
   const registerEntry = () => registerSidebarEntry({
     parent: null, name, label: page.label, url: page.path, icon: page.icon, useClusterURL: false, sidebar,
   });
-  if (page.name === 'deployment') void api<Account>('/me').then(account => { if (account.admin) registerEntry(); }).catch(() => {});
+  if (page.name === 'deployment' || page.name === 'approvals') void api<Account>('/me')
+    .then(account => { if (page.name === 'deployment' ? account.admin : account.canApprove) registerEntry(); }).catch(() => {});
   else registerEntry();
   registerRoute({ path: page.path, name, component: page.component, exact: true,
     useClusterURL: false, noAuthRequired: true, sidebar: { item: name, sidebar } });

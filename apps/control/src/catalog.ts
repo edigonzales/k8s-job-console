@@ -54,6 +54,7 @@ export const definition = z.strictObject({
   runtime: z.literal('gretl'),
   script: z.string().regex(/^[\w-]+\.groovy$/),
   exposed: z.boolean().default(true),
+  onSuccess: z.strictObject({ job: jobId }).optional(),
   access: access.default({}),
   outputs: z.array(output).max(32).default([]),
   execution: execution.default({ serial: true, timeoutSeconds: 3600 }),
@@ -130,7 +131,17 @@ export function parseJob(input: unknown): Job {
     outputNames.add(item.name);
     outputPaths.add(item.path);
   }
-  for (const p of job.parameters) {
+  validateParameters(job.parameters, names);
+  if (job.schedule) {
+    if (job.parameters.some(p => p.type === 'file')) throw new Error('Scheduled jobs cannot upload files');
+    validateValues(job, {});
+  }
+  if (!job.exposed && job.onSuccess) throw new Error('Internal jobs cannot declare a successor');
+  return { ...job, resolvedCron: job.schedule && resolveCron(job.id, job.schedule.cron, job.schedule.timeZone) };
+}
+
+export function validateParameters(parameters: Parameter[], names = new Set<string>()) {
+  for (const p of parameters) {
     if (names.has(p.name)) throw new Error(`Duplicate parameter: ${p.name}`);
     names.add(p.name);
     if ((p.type === 'enum') !== Boolean(p.options) || (p.type === 'file') !== Boolean(p.accept)) {
@@ -141,14 +152,10 @@ export function parseJob(input: unknown): Job {
       throw new Error(`Invalid enum options for ${p.name}`);
     }
     if (p.default !== undefined && !validValue(p, p.default)) throw new Error(`Invalid default for ${p.name}`);
-    if (job.schedule && (p.type === 'file' || (p.required && p.default === undefined))) {
-      throw new Error(`Scheduled jobs require defaults for required parameters and cannot upload files: ${p.name}`);
-    }
   }
-  return { ...job, resolvedCron: job.schedule && resolveCron(job.id, job.schedule.cron, job.schedule.timeZone) };
 }
 
-export function validateValues(job: Job, input: unknown, files = new Set<string>()): Values {
+export function validateValues(job: Pick<Job, 'parameters'>, input: unknown, files = new Set<string>()): Values {
   if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new Error('Expected a parameters object');
   const entries = input as Record<string, unknown>;
   const result: Values = {};

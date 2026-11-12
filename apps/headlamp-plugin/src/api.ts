@@ -10,12 +10,13 @@ export interface Parameter {
   accept?: string[];
   options?: { value: string; label: string }[];
 }
-export interface Account { id: string; displayName: string; admin: boolean }
+export interface Account { id: string; displayName: string; admin: boolean; canApprove: boolean }
 export interface Job {
   id: string;
   name: string;
   description: string;
   runtime: string;
+  kind?: 'job' | 'flow';
   allowed: ('view' | 'run' | 'approve' | 'manage')[];
   source?: { revision: string; ref?: string };
   preview?: boolean;
@@ -33,6 +34,19 @@ export interface Schedule {
   canManage: boolean;
   lastSchedule?: string;
 }
+export interface Approval {
+  step: string;
+  message: string;
+  fields: Parameter[];
+  commentRequired: boolean;
+  phase: string;
+  decision?: string;
+  decidedAt?: string;
+  decidedBy?: string;
+  comment?: string;
+  canApprove?: boolean;
+  canDecide?: boolean;
+}
 export interface Run {
   name: string;
   jobId: string;
@@ -42,6 +56,7 @@ export interface Run {
   status: 'Pending' | 'Queued' | 'Running' | 'AwaitingInput' | 'Canceling' | 'Succeeded' | 'Failed' | 'Canceled' | 'Rejected';
   revision?: string;
   image?: string;
+  approvals?: Approval[];
   steps: { id: string; name: string; status: string; reason?: string }[];
   reason?: string;
   parameters: Record<string, Value>;
