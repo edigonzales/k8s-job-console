@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headlamp
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: headlamp-proxy
+data:
+  default.conf: |
+    server {
+      listen 127.0.0.1:8080;
+      server_name localhost 127.0.0.1;
+      if ($host !~ "^(localhost|127\.0\.0\.1)$") { return 403; }
+      location /job-console-api/ {
+        client_max_body_size 1025m;
+        proxy_http_version 1.1;
+        proxy_request_buffering off;
+        proxy_read_timeout 300s;
+        proxy_pass http://launcher:8080/;
+      }
+      location / {
+        proxy_pass http://127.0.0.1:4466;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: headlamp
+spec:
+  selector:
+    matchLabels: {app: headlamp}
+  template:
+    metadata:
+      labels: {app: headlamp}
+    spec:
+      serviceAccountName: headlamp
+      securityContext:
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: headlamp
+          image: job-console-headlamp:local
+          imagePullPolicy: Never
+          args: ["-in-cluster", "-listen-addr=127.0.0.1"]
+          readinessProbe:
+            exec:
+              command: [wget, -q, -O, /dev/null, "http://127.0.0.1:4466/"]
+          resources:
+            requests: {memory: 64Mi, cpu: 50m}
+            limits: {memory: 256Mi, cpu: 500m}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 100
+            runAsGroup: 101
+            capabilities: {drop: [ALL]}
+        - name: proxy
+          image: nginxinc/nginx-unprivileged:1.28-alpine
+          ports: [{containerPort: 8080}]
+          readinessProbe:
+            exec:
+              command: [wget, -q, -O, /dev/null, "http://127.0.0.1:8080/"]
+          resources:
+            requests: {memory: 16Mi, cpu: 25m}
+            limits: {memory: 64Mi, cpu: 250m}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: proxy, mountPath: /etc/nginx/conf.d, readOnly: true}
+      volumes:
+        - name: proxy
+          configMap: {name: headlamp-proxy}

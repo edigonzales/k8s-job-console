@@ -1,0 +1,103 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: job-console-runtime
+data:
+  runtime.json: '{"schemaVersion":1}'
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: launcher
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: launcher
+rules:
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [create, get, list, patch, delete]
+  - apiGroups: [batch]
+    resources: [cronjobs]
+    verbs: [list]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list]
+  - apiGroups: [""]
+    resources: [pods/log]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: launcher
+subjects:
+  - {kind: ServiceAccount, name: launcher}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: launcher}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: launcher
+spec:
+  selector:
+    matchLabels: {app: launcher}
+  template:
+    metadata:
+      labels: {app: launcher}
+    spec:
+      serviceAccountName: launcher
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: launcher
+          image: job-console-control:local
+          imagePullPolicy: Never
+          ports: [{containerPort: 8080}]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          env:
+            - {name: LOCAL_UNAUTHENTICATED, value: "true"}
+            - {name: GRETL_IMAGE, value: "job-console-gretl:local"}
+            - {name: CONTROL_IMAGE, value: "job-console-control:local"}
+            - name: NAMESPACE
+              valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+          envFrom:
+            - configMapRef: {name: job-console-storage}
+            - secretRef: {name: job-console-storage}
+          resources:
+            requests: {memory: 128Mi, cpu: 100m}
+            limits: {memory: 256Mi, cpu: "1"}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8080}
+            periodSeconds: 2
+          volumeMounts: [{name: catalog, mountPath: /catalog, readOnly: true}]
+      volumes:
+        - name: catalog
+          configMap: {name: job-console-catalog}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: launcher
+spec:
+  selector: {app: launcher}
+  ports: [{port: 8080}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: launcher
+spec:
+  podSelector: {matchLabels: {app: launcher}}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {matchLabels: {app: headlamp}}
+      ports: [{port: 8080}]
