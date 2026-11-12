@@ -20,9 +20,9 @@ for ((attempt=0; attempt<60; attempt++)); do
 done
 [[ -n $node ]]
 
-port=${ARGO_SMOKE_PORT:-42747}
 forward_log=$(mktemp)
-k port-forward --address 127.0.0.1 svc/argo-server "$port:2746" > "$forward_log" 2>&1 &
+kubectl --context rancher-desktop --namespace job-console port-forward \
+  --address 127.0.0.1 svc/argo-server :2746 > "$forward_log" 2>&1 &
 forward_pid=$!
 trap 'kill "$forward_pid" 2>/dev/null || true; rm -f "$forward_log"' EXIT
 for ((attempt=0; attempt<20; attempt++)); do
@@ -30,7 +30,8 @@ for ((attempt=0; attempt<20; attempt++)); do
   kill -0 "$forward_pid" 2>/dev/null || { cat "$forward_log" >&2; exit 1; }
   sleep 0.5
 done
-rg -q 'Forwarding from' "$forward_log"
+port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) -> 2746$/\1/p' "$forward_log")
+[[ -n $port ]]
 
 # Argo's namespace installer uses a self-signed certificate on this local tunnel.
 token=$(k create token argo --duration=10m)
@@ -57,6 +58,8 @@ for step in analyze verify; do
     k logs "$pod" -c wait | rg 'S3 Save'
   else
     k logs "$pod" -c init | rg 'S3 Load'
-    k logs "$pod" -c main
+    k logs "$pod" -c main | sed -n '/^{"schemaVersion":/p' | jq -e '
+      select(.execution.status == "SUCCEEDED" and .execution.requestedTargets == ["analyze"]) |
+      {source, status: .execution.status, targets: .execution.requestedTargets}'
   fi
 done
