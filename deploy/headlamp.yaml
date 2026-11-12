@@ -17,7 +17,7 @@ data:
       location = /signed-out {
         default_type text/html;
         add_header Cache-Control no-store;
-        return 200 '<!doctype html><html lang="de"><meta charset="utf-8"><title>Abgemeldet</title><h1>Abgemeldet</h1><a href="/">Anmelden</a></html>';
+        return 200 '<!doctype html><html lang="de"><meta charset="utf-8"><title>Abgemeldet</title><h1>Abgemeldet</h1><a href="/oauth2/start?rd=/">Anmelden</a></html>';
       }
       location /identity/realms/job-console/ {
         proxy_set_header Host $http_host;
