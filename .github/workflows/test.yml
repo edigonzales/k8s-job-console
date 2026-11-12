@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: edigonzales/gretl-runtime-jobs
-          ref: 2e386eaccee9309e01d16c07bff939afa43830e4
+          ref: cda3526f5b0f26ee4f79a8e8809fb72dbb8d3d76
           path: gretl-runtime-jobs
       - name: Validate example definitions and manifests
         working-directory: k8s-job-console
@@ -42,14 +42,14 @@ jobs:
                 const resource = document.toJS();
                 if (resource.kind !== "CustomResourceDefinition") continue;
                 const schema = resource.spec.versions.find(version => version.name === "v1alpha1")?.schema?.openAPIV3Schema;
-                if (schema) writeFileSync("build/argo-schemas/" + resource.spec.names.kind + ".json", JSON.stringify(schema));
+                if (schema) writeFileSync("build/argo-schemas/" + resource.spec.names.kind.toLowerCase() + ".json", JSON.stringify(schema));
               }
             '
           docker run --rm -v "$PWD:/work:ro" ghcr.io/yannh/kubeconform:v0.7.0 \
             -strict -kubernetes-version 1.35.0 -schema-location default \
             -schema-location '/work/build/argo-schemas/{{.ResourceKind}}.json' \
             /work/deploy /work/build/generated/cronworkflows.yaml /work/build/generated/workflowtemplates.yaml /work/build/generated/catalog-configmap.yaml \
-            /work/scripts/argo-smoke.yaml /work/test/e2e/fixtures/wait-workflow.yaml
+            /work/scripts/argo-smoke.yaml /work/test/e2e/fixtures
       - name: Build images
         working-directory: k8s-job-console
         run: |
