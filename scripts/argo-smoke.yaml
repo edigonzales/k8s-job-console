@@ -1,0 +1,115 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: console-v2-smoke-
+  labels:
+    job-console.io/test-fixture: "true"
+spec:
+  serviceAccountName: job-console-executor
+  entrypoint: smoke
+  activeDeadlineSeconds: 300
+  ttlStrategy:
+    secondsAfterCompletion: 3600
+  artifactRepositoryRef:
+    configMap: job-console-artifacts
+    key: rustfs
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile: {type: RuntimeDefault}
+  volumes:
+    - {name: work, emptyDir: {}}
+    - {name: tmp, emptyDir: {}}
+    - {name: reports, emptyDir: {}}
+    - {name: run, emptyDir: {}}
+    - {name: config, configMap: {name: job-console-runtime}}
+  templates:
+    - name: smoke
+      steps:
+        - - {name: seed, template: seed}
+        - - name: analyze
+            template: analyze
+            arguments:
+              artifacts:
+                - {name: csv, from: "{{steps.seed.outputs.artifacts.csv}}"}
+        - - {name: review, template: review}
+        - - name: verify
+            template: verify
+            arguments:
+              artifacts:
+                - {name: report, from: "{{steps.analyze.outputs.artifacts.report}}"}
+              parameters:
+                - {name: decision, value: "{{steps.review.outputs.parameters.decision}}"}
+    - name: seed
+      inputs:
+        artifacts:
+          - name: fixture
+            path: /work/input.csv
+            raw:
+              data: |
+                id,name
+                1,Ada
+                2,Grace
+      container:
+        image: job-console-gretl:18eaf3254a16
+        imagePullPolicy: Never
+        command: [/bin/sh, -c]
+        args: ["test -s /work/input.csv"]
+        volumeMounts: [{name: work, mountPath: /work}]
+      outputs:
+        artifacts:
+          - {name: csv, path: /work/input.csv, archive: {none: {}}}
+    - name: analyze
+      inputs:
+        artifacts:
+          - {name: csv, path: /work/input.csv}
+          - name: source
+            path: /source
+            git:
+              repo: https://github.com/edigonzales/gretl-runtime-jobs.git
+              revision: 0e6d61a9e247d84717eb3a956c52a5a1a4f761d5
+      container:
+        image: job-console-gretl:18eaf3254a16
+        imagePullPolicy: Never
+        command: [/opt/gretl/bin/gretl]
+        args:
+          - run
+          - /source/jobs/csv-analyzer/job.groovy
+          - --config
+          - /config/runtime.json
+          - --report
+          - /reports/report.json
+          - --param
+          - inputFile=/work/input.csv
+        volumeMounts:
+          - {name: work, mountPath: /work}
+          - {name: tmp, mountPath: /tmp}
+          - {name: reports, mountPath: /reports}
+          - {name: run, mountPath: /run}
+          - {name: config, mountPath: /config, readOnly: true}
+      outputs:
+        artifacts:
+          - {name: report, path: /reports/report.json, archive: {none: {}}}
+    - name: review
+      suspend: {duration: 240s}
+      outputs:
+        parameters:
+          - name: decision
+            valueFrom: {supplied: {}}
+    - name: verify
+      inputs:
+        artifacts:
+          - {name: report, path: /work/report.json}
+        parameters:
+          - {name: decision}
+      container:
+        image: job-console-gretl:18eaf3254a16
+        imagePullPolicy: Never
+        command: [/bin/sh, -ec]
+        args:
+          - 'test "$1" = approved && test -s /work/report.json && cat /work/report.json'
+          - verify
+          - "{{inputs.parameters.decision}}"
+        volumeMounts: [{name: work, mountPath: /work}]
