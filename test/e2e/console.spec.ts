@@ -218,10 +218,15 @@ test('administrator pauses a schedule and the pause survives synchronization and
       { timeout: 90_000 }).toBe('Succeeded');
     kubectl('rollout', 'restart', 'deployment/launcher');
     kubectl('rollout', 'status', 'deployment/launcher', '--timeout=90s');
+    await expect.poll(async () => {
+      const response = await page.request.get(apiRoot + '/schedules');
+      if (!response.ok()) return undefined;
+      return (await response.json()).find((item: { id: string }) => item.id === 'scheduled-report')?.active;
+    }, { timeout: 30_000 }).toBe(false);
     await page.reload();
-    await expect(page.getByRole('cell', { name: 'Suspendiert' })).toBeVisible();
+    await expect(page.getByRole('cell', { name: 'Suspendiert' })).toBeVisible({ timeout: 30_000 });
   } finally {
-    await page.request.post(path + '/resume', { headers: origin });
+    expect((await page.request.post(path + '/resume', { headers: origin })).status()).toBe(200);
   }
 });
 
