@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-console-keycloak
+spec:
+  selector: {matchLabels: {app: job-console-keycloak}}
+  template:
+    metadata: {labels: {app: job-console-keycloak}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.8.2
+          args: [start-dev, --import-realm]
+          env:
+            - {name: KC_HTTP_RELATIVE_PATH, value: /identity}
+            - {name: KC_HOSTNAME, value: "http://127.0.0.1:4466/identity"}
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe:
+            httpGet: {path: /identity/realms/job-console/.well-known/openid-configuration, port: http}
+            periodSeconds: 2
+          volumeMounts: [{name: realm, mountPath: /opt/keycloak/data/import, readOnly: true}]
+      volumes:
+        - name: realm
+          secret: {secretName: job-console-local-realm}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: job-console-keycloak
+spec:
+  selector: {app: job-console-keycloak}
+  ports: [{name: http, port: 8080}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-console-oauth2-proxy
+spec:
+  selector: {matchLabels: {app: job-console-oauth2-proxy}}
+  template:
+    metadata: {labels: {app: job-console-oauth2-proxy}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.6
+          args:
+            - --provider=oidc
+            - --client-id=job-console
+            - --http-address=0.0.0.0:4180
+            - --redirect-url=http://127.0.0.1:4466/oauth2/callback
+            - --oidc-issuer-url=http://127.0.0.1:4466/identity/realms/job-console
+            - --skip-oidc-discovery=true
+            - --login-url=http://127.0.0.1:4466/identity/realms/job-console/protocol/openid-connect/auth
+            - --redeem-url=http://job-console-keycloak:8080/identity/realms/job-console/protocol/openid-connect/token
+            - --oidc-jwks-url=http://job-console-keycloak:8080/identity/realms/job-console/protocol/openid-connect/certs
+            - --scope=openid profile email
+            - --backend-logout-url=http://job-console-keycloak:8080/identity/realms/job-console/protocol/openid-connect/logout?id_token_hint={id_token}
+            - --email-domain=*
+            - --set-xauthrequest=true
+            - --pass-access-token=true
+            - --reverse-proxy=true
+            - --skip-provider-button=true
+            - --prompt=login
+            - --request-logging=false
+            - --cookie-secure=false
+            - --cookie-expire=5m
+            - --code-challenge-method=S256
+            - --upstream=static://202
+          envFrom: [{secretRef: {name: job-console-oauth2-proxy}}]
+          ports: [{name: http, containerPort: 4180}]
+          readinessProbe:
+            httpGet: {path: /ready, port: http}
+            periodSeconds: 2
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: job-console-oauth2-proxy
+spec:
+  selector: {app: job-console-oauth2-proxy}
+  ports: [{name: http, port: 4180}]

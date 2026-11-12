@@ -20,7 +20,7 @@ rules:
     verbs: [create, get, list, patch, update, delete]
   - apiGroups: [argoproj.io]
     resources: [cronworkflows]
-    verbs: [list]
+    verbs: [get, list, patch]
   - apiGroups: [argoproj.io]
     resources: [workflowtemplates]
     verbs: [get]
@@ -72,7 +72,12 @@ spec:
             readOnlyRootFilesystem: true
             capabilities: {drop: [ALL]}
           env:
-            - {name: LOCAL_UNAUTHENTICATED, value: "true"}
+            - {name: OIDC_DEV_MODE, value: "true"}
+            - {name: OIDC_ISSUER, value: "http://127.0.0.1:4466/identity/realms/job-console"}
+            - {name: OIDC_JWKS, value: "http://job-console-keycloak:8080/identity/realms/job-console/protocol/openid-connect/certs"}
+            - {name: OIDC_AUDIENCE, value: job-console-api}
+            - {name: CONSOLE_ADMIN_GROUPS, value: console-admins}
+            - {name: LOCAL_ORIGINS, value: "http://127.0.0.1:4466"}
             - {name: ARGO_ENDPOINT, value: "https://argo-server:2746"}
             - {name: NODE_EXTRA_CA_CERTS, value: "/argo-ca/tls.crt"}
             - name: NAMESPACE

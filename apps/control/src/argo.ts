@@ -32,6 +32,7 @@ export interface Workflow {
     startedAt?: string;
     finishedAt?: string;
     nodes?: Record<string, Node>;
+    outputs?: Node['outputs'];
     synchronization?: { mutex?: { waiting?: { mutex: string }[] } };
   };
 }

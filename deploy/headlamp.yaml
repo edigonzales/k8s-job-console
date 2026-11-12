@@ -13,7 +13,58 @@ data:
       listen 127.0.0.1:8080;
       server_name localhost 127.0.0.1;
       if ($host !~ "^(localhost|127\.0\.0\.1)$") { return 403; }
+      location = /ready { return 204; }
+      location = /signed-out {
+        default_type text/html;
+        add_header Cache-Control no-store;
+        return 200 '<!doctype html><html lang="de"><meta charset="utf-8"><title>Abgemeldet</title><h1>Abgemeldet</h1><a href="/">Anmelden</a></html>';
+      }
+      location /identity/realms/job-console/ {
+        proxy_set_header Host $http_host;
+        proxy_pass http://job-console-keycloak:8080;
+      }
+      location /identity/resources/ {
+        proxy_pass http://job-console-keycloak:8080;
+      }
+      location /oauth2/ {
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Auth-Request-Redirect $request_uri;
+        proxy_pass http://job-console-oauth2-proxy:4180;
+      }
+      location = /oauth2/auth {
+        internal;
+        proxy_pass http://job-console-oauth2-proxy:4180;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Authorization "";
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Original-URI $request_uri;
+      }
+      location @login {
+        rewrite ^ /oauth2/start break;
+        proxy_pass http://job-console-oauth2-proxy:4180;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Auth-Request-Redirect $request_uri;
+      }
+      location @api_unauthorized {
+        default_type application/json;
+        return 401 '{"error":"Sign in to continue"}';
+      }
       location /job-console-api/ {
+        auth_request /oauth2/auth;
+        auth_request_set $access_token $upstream_http_x_auth_request_access_token;
+        error_page 401 = @api_unauthorized;
+        proxy_set_header Authorization "Bearer $access_token";
+        proxy_set_header Cookie "";
+        proxy_set_header X-User "";
+        proxy_set_header X-Groups "";
+        proxy_set_header X-Forwarded-Access-Token "";
+        proxy_set_header X-Auth-Request-User "";
+        proxy_set_header X-Auth-Request-Groups "";
         client_max_body_size 1025m;
         proxy_http_version 1.1;
         proxy_request_buffering off;
@@ -21,6 +72,8 @@ data:
         proxy_pass http://launcher:8080/;
       }
       location / {
+        auth_request /oauth2/auth;
+        error_page 401 = @login;
         proxy_pass http://127.0.0.1:4466;
       }
     }
@@ -61,7 +114,7 @@ spec:
           ports: [{containerPort: 8080}]
           readinessProbe:
             exec:
-              command: [wget, -q, -O, /dev/null, "http://127.0.0.1:8080/"]
+              command: [wget, -q, -O, /dev/null, "http://127.0.0.1:8080/ready"]
           resources:
             requests: {memory: 16Mi, cpu: 25m}
             limits: {memory: 64Mi, cpu: 250m}

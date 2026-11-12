@@ -8,12 +8,16 @@ import { argoClient, type Artifact, type Workflow } from './argo.js';
 import { jobIdLabel, managedBy, workflow, parametersAnnotation, revisionAnnotation, imageAnnotation,
   outputLabelsAnnotation, triggerAnnotation, selector, templateName, type CatalogJob } from './workflows.js';
 import { sync } from './sync.js';
+import { authenticator, can, isAdmin, principalId, type Action, type Principal } from './identity.js';
 import { type Values } from './catalog.js';
 import { fileLimit, storage, totalLimit } from './storage.js';
 
 class HttpError extends Error {
   constructor(public statusCode: number, message: string) { super(message); }
 }
+const forbidden = () => new HttpError(403, 'Action not permitted');
+const starterAnnotation = 'job-console.io/started-by';
+const starterNameAnnotation = 'job-console.io/started-by-name';
 const bad = (message: string) => new HttpError(400, message);
 const missing = () => new HttpError(404, 'Job or run not found');
 const conflict = (message: string) => new HttpError(409, message);
@@ -39,13 +43,16 @@ export function runState(run: Workflow, candidates: V1Pod[] = []) {
 
 function summary(run: Workflow, candidates: V1Pod[] = []) {
   const annotations = run.metadata.annotations ?? {};
+  const scheduled = annotations[triggerAnnotation] === 'schedule' ||
+    Boolean(run.metadata.ownerReferences?.some(owner => owner.kind === 'CronWorkflow'));
   return {
     name: run.metadata.name, jobId: run.metadata.labels?.[jobIdLabel],
     created: run.metadata.creationTimestamp, started: run.status?.startedAt, finished: run.status?.finishedAt,
     revision: annotations[revisionAnnotation], image: annotations[imageAnnotation],
     parameters: JSON.parse(annotations[parametersAnnotation] ?? '{}'),
-    scheduled: annotations[triggerAnnotation] === 'schedule' ||
-      Boolean(run.metadata.ownerReferences?.some(owner => owner.kind === 'CronWorkflow')),
+    scheduled,
+    starter: annotations[starterAnnotation] ?? (scheduled ? 'system:schedule' : undefined),
+    starterName: annotations[starterNameAnnotation],
     steps: Object.values(run.status?.nodes ?? {}).filter(node => ['Pod', 'Suspend'].includes(node.type))
       .map(({ id, displayName, phase, message }) => ({ id, name: displayName, status: phase, reason: message })),
     ...runState(run, candidates),
@@ -55,14 +62,37 @@ function summary(run: Workflow, candidates: V1Pod[] = []) {
 export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<CatalogJob[]>), argo: ReturnType<typeof argoClient>, core: CoreV1Api,
   custom: CustomObjectsApi, namespace: string,
   s3: Pick<ReturnType<typeof storage>, 'upload' | 'remove' | 'download' | 'stat'> = storage(),
-  limits = { file: fileLimit, total: totalLimit }) {
+  limits = { file: fileLimit, total: totalLimit },
+  authenticate?: ReturnType<typeof authenticator>) {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' }, bodyLimit: 256 * 1024 });
   await app.register(multipart, { limits: { fileSize: limits.file, fieldSize: 256 * 1024, parts: 33, headerPairs: 32 } });
+  const principals = new WeakMap<FastifyRequest, Principal>();
+  const principal = (request: FastifyRequest) => principals.get(request);
+  const permitted = (request: FastifyRequest, action: Action, job?: CatalogJob) => {
+    const user = principal(request);
+    return !user || (job ? can(user, action, job.access) :
+      isAdmin(user) && (action === 'view' || action === 'manage'));
+  };
+  const assertAction = (request: FastifyRequest, action: Action, job?: CatalogJob) => {
+    if (!permitted(request, 'view', job)) throw missing();
+    if (!permitted(request, action, job)) throw forbidden();
+  };
+  const assertAdmin = (request: FastifyRequest) => {
+    const user = principal(request);
+    if (user && !isAdmin(user)) throw forbidden();
+  };
+  const actions = (request: FastifyRequest, job: CatalogJob) =>
+    (['view', 'run', 'approve', 'manage'] as const).filter(action => permitted(request, action, job));
   app.addHook('onRequest', async request => {
     const origin = request.headers.origin;
     if (request.headers['sec-fetch-site'] === 'cross-site' ||
+        (authenticate && !['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !origin) ||
         (origin && !(process.env.LOCAL_ORIGINS ?? 'http://localhost:4466,http://127.0.0.1:4466').split(',').includes(origin))) {
       throw new HttpError(403, 'Origin not permitted');
+    }
+    if (authenticate && request.url !== '/healthz') {
+      try { principals.set(request, await authenticate(request)); }
+      catch { throw new HttpError(401, 'Sign in to continue'); }
     }
   });
   app.setErrorHandler((error, request, reply) => {
@@ -80,13 +110,16 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
     if (!job) throw missing();
     return job;
   };
-  const findRun = async (name: string) => {
+  const entryFor = (catalog: CatalogJob[], run: Workflow) =>
+    catalog.find(job => job.exposed && job.id === run.metadata.labels?.[jobIdLabel]);
+  const findRun = async (request: FastifyRequest, name: string) => {
     if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) throw missing();
     const job = await argo.get(name).catch(error => {
       if (kubeCode(error) === 404) throw missing();
       throw error;
     });
     if (job.metadata?.labels?.[managedBy] !== 'job-console' || !job.metadata.labels[jobIdLabel]) throw missing();
+    assertAction(request, 'view', entryFor(await catalog(), job));
     return job;
   };
   const pods = async () => (await core.listNamespacedPod({ namespace, labelSelector: 'workflows.argoproj.io/workflow' })).items;
@@ -108,8 +141,12 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
     }
     return template.spec;
   }
-  function createRun(job: CatalogJob, name: string, values: Values, files: string[], template?: Workflow['spec'], inputRun?: string) {
+  function createRun(request: FastifyRequest, job: CatalogJob, name: string, values: Values, files: string[], template?: Workflow['spec'], inputRun?: string) {
     const run = workflow(job, name, values, files, inputRun ?? name);
+    const user = principal(request);
+    if (user) Object.assign(run.metadata.annotations!, {
+      [starterAnnotation]: principalId(user), [starterNameAnnotation]: user.displayName,
+    });
     if (!template) return argo.create(run);
     type Task = { inputs: { artifacts: unknown[] } };
     const expected = (run.spec.templates as Task[])[0];
@@ -120,13 +157,15 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
 
   const syncLabel = 'job-console.io/sync';
   const syncRef = process.env.JOBS_REF ?? 'main';
-  const previewEnabled = process.env.ALLOW_PREVIEW === 'true';
+  const previewEnabled = process.env.ALLOW_PREVIEW === 'true' && process.env.OIDC_DEV_MODE === 'true';
   const syncInfo = (run: Workflow) => ({
     ...summary(run),
+    revision: run.status?.outputs?.parameters?.find(parameter => parameter.name === 'source-revision')?.value,
     ref: (run.spec.arguments as { parameters?: { name: string; value?: string }[] } | undefined)
       ?.parameters?.find(parameter => parameter.name === 'ref')?.value || syncRef,
   });
-  app.get('/api/synchronizations', async () => {
+  app.get('/api/synchronizations', async request => {
+    assertAdmin(request);
     const [jobs, result] = await Promise.all([catalog(), argo.list(syncLabel + '=true')]);
     return {
       repository: process.env.JOBS_REPOSITORY,
@@ -137,7 +176,9 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
         .sort((a, b) => new Date(b.created ?? 0).getTime() - new Date(a.created ?? 0).getTime()),
     };
   });
-  app.get<{ Params: { name: string } }>('/api/synchronizations/:name', async ({ params }) => {
+  app.get<{ Params: { name: string } }>('/api/synchronizations/:name', async request => {
+    assertAdmin(request);
+    const { params } = request;
     if (!/^job-console-sync-[a-z0-9-]+$/.test(params.name)) throw missing();
     const run = await argo.get(params.name).catch(error => { if (kubeCode(error) === 404) throw missing(); throw error; });
     if (run.metadata.labels?.[syncLabel] !== 'true') throw missing();
@@ -150,6 +191,7 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
     return { ...syncInfo(run), logs };
   });
   app.post('/api/synchronizations', async (request, reply) => {
+    assertAdmin(request);
     const body = request.body ?? {};
     if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'ref')) {
       throw bad('Expected an optional Git branch');
@@ -157,35 +199,75 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
     const ref = (body as { ref?: unknown }).ref ?? syncRef;
     if (typeof ref !== 'string' || !/^[-a-zA-Z0-9._/]{1,150}$/.test(ref) || ref.startsWith('-') ||
         ref.includes('..') || (ref !== syncRef && !previewEnabled)) throw bad('Git branch is not allowed');
+    const user = principal(request);
     const run = await argo.create({
       apiVersion: 'argoproj.io/v1alpha1', kind: 'Workflow',
-      metadata: { generateName: 'job-console-sync-', labels: { [syncLabel]: 'true' } },
+      metadata: { generateName: 'job-console-sync-', labels: { [syncLabel]: 'true' },
+        annotations: user && { [starterAnnotation]: principalId(user), [starterNameAnnotation]: user.displayName } },
       spec: { workflowTemplateRef: { name: 'job-console-sync' }, arguments: { parameters: [{ name: 'ref', value: ref }] } },
     });
     return reply.code(201).send(syncInfo(run));
   });
 
   app.get('/healthz', async () => ({ status: 'ok' }));
-  app.get('/api/jobs', async () => (await catalog()).filter(job => job.exposed).map(
-    ({ id, name, description, runtime, source, parameters, schedule, resolvedCron }) =>
-      ({ id, name, description, runtime, kind: 'job', source, parameters, scheduled: Boolean(schedule), schedule, resolvedCron })));
-  app.get<{ Params: { id: string } }>('/api/jobs/:id', async ({ params }) => {
-    const { script: _script, resources: _resources, ...details } = await findJob(params.id);
-    return details;
+  app.get('/api/me', async request => {
+    const user = principal(request);
+    if (!user) throw new HttpError(401, 'Sign in to continue');
+    return { id: principalId(user), displayName: user.displayName, admin: isAdmin(user) };
   });
-  app.get('/api/schedules', async () => {
+  app.get('/api/jobs', async request => (await catalog()).filter(job => job.exposed && permitted(request, 'view', job))
+    .map(job => {
+      const { id, name, description, runtime, source, parameters, schedule, resolvedCron } = job;
+      return { id, name, description, runtime, kind: 'job', source, preview: Boolean(source.ref && source.ref !== syncRef), parameters, schedule, resolvedCron,
+        allowed: actions(request, job) };
+    }));
+  app.get<{ Params: { id: string } }>('/api/jobs/:id', async request => {
+    const job = await findJob(request.params.id);
+    assertAction(request, 'view', job);
+    const { script: _script, resources: _resources, access: _access, ...details } = job;
+    return { ...details, preview: Boolean(job.source.ref && job.source.ref !== syncRef), allowed: actions(request, job) };
+  });
+  app.get('/api/schedules', async request => {
     const schedules = await custom.listNamespacedCustomObject({
       group: 'argoproj.io', version: 'v1alpha1', plural: 'cronworkflows', namespace, labelSelector: selector,
     }) as { items: { metadata: { name: string }; spec?: { suspend?: boolean }; status?: { lastScheduledTime?: string } }[] };
-    return (await catalog()).filter(job => job.schedule).map(job => {
+    return (await catalog()).filter(job => job.schedule && permitted(request, 'view', job)).map(job => {
       const cron = schedules.items.find(item => item.metadata?.name === job.id);
       return { id: job.id, name: job.name, ...job.schedule, resolvedCron: job.resolvedCron,
-        active: cron ? !cron.spec?.suspend : null, lastSchedule: cron?.status?.lastScheduledTime };
+        active: cron ? !cron.spec?.suspend : null, canManage: permitted(request, 'manage', job), lastSchedule: cron?.status?.lastScheduledTime };
     });
   });
 
+  for (const [action, suspend] of [['pause', true], ['resume', false]] as const) {
+    app.post<{ Params: { id: string } }>(`/api/schedules/:id/${action}`, async request => {
+      const job = await findJob(request.params.id);
+      assertAction(request, 'manage', job);
+      if (!job.schedule) throw missing();
+      const resource = { group: 'argoproj.io', version: 'v1alpha1', plural: 'cronworkflows', namespace, name: job.id };
+      const cron = await custom.getNamespacedCustomObject(resource).catch(error => {
+        if (kubeCode(error) === 404) throw missing();
+        throw error;
+      }) as { metadata: Workflow['metadata'] };
+      if (cron.metadata.labels?.[managedBy] !== 'job-console') throw missing();
+      const user = principal(request);
+      await custom.patchNamespacedCustomObject({ ...resource, body: [
+        { op: 'test', path: '/metadata/resourceVersion', value: cron.metadata.resourceVersion },
+        { op: 'add', path: '/metadata/annotations', value: {
+          ...cron.metadata.annotations, 'job-console.io/schedule-changed-at': new Date().toISOString(),
+          'job-console.io/schedule-changed-by': user ? principalId(user) : 'test',
+        } },
+        { op: 'add', path: '/spec/suspend', value: suspend },
+      ] }).catch(error => {
+        if ([409, 422].includes(kubeCode(error) ?? 0)) throw conflict('The schedule changed. Refresh and try again.');
+        throw error;
+      });
+      return { active: !suspend };
+    });
+  }
+
   app.post<{ Params: { id: string } }>('/api/jobs/:id/runs', async (request, reply) => {
     const job = await findJob(request.params.id);
+    assertAction(request, 'run', job);
     const displayedRevision = request.headers['x-job-revision'];
     if (displayedRevision !== undefined && displayedRevision !== job.source.revision) {
       throw conflict('The job definition changed. Reload it before starting.');
@@ -249,8 +331,13 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
       try { values = validateValues(job, input, files); }
       catch (error) { throw bad((error as Error).message); }
       if (controller.signal.aborted) throw bad('Upload interrupted');
+      if (authenticate) {
+        try { principals.set(request, await authenticate(request)); }
+        catch { throw new HttpError(401, 'Sign in to continue'); }
+        assertAction(request, 'run', await findJob(job.id));
+      }
       creating = true;
-      const created = await createRun(job, name, values, [...files], template);
+      const created = await createRun(request, job, name, values, [...files], template);
       return reply.code(201).send(summary(created));
     } catch (error) {
       // A transport failure during creation can mean the Job already exists.
@@ -269,18 +356,18 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
   });
 
   type RunRequest = FastifyRequest<{ Params: { name: string } }>;
-  app.get('/api/runs', async () => {
-    const [runs, candidates] = await Promise.all([argo.list(selector), pods()]);
-    return (runs.items ?? []).sort((a, b) =>
+  app.get('/api/runs', async request => {
+    const [runs, candidates, jobs] = await Promise.all([argo.list(selector), pods(), catalog()]);
+    return (runs.items ?? []).filter(run => permitted(request, 'view', entryFor(jobs, run))).sort((a, b) =>
       new Date(b.metadata.creationTimestamp ?? 0).getTime() - new Date(a.metadata.creationTimestamp ?? 0).getTime())
       .map(run => summary(run, podsFor(run, candidates)));
   });
   app.get('/api/runs/:name', async (request: RunRequest) => {
-    const run = await findRun(request.params.name);
+    const run = await findRun(request, request.params.name);
     return summary(run, podsFor(run, await pods()));
   });
   app.get('/api/runs/:name/logs', async (request: RunRequest) => {
-    const run = await findRun(request.params.name);
+    const run = await findRun(request, request.params.name);
     const candidates = podsFor(run, await pods());
     const logs = await Promise.all(candidates.map(async pod => {
       const containers = [...pod.status?.initContainerStatuses ?? [], ...pod.status?.containerStatuses ?? []]
@@ -314,10 +401,10 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
     }));
   }
   app.get('/api/runs/:name/artifacts', async (request: RunRequest) =>
-    Promise.all(artifacts(await findRun(request.params.name)).map(async ({ key, ...item }) =>
+    Promise.all(artifacts(await findRun(request, request.params.name)).map(async ({ key, ...item }) =>
       ({ ...item, ...await s3.stat(key) }))));
   app.get<{ Params: { name: string; artifact: string } }>('/api/runs/:name/artifacts/:artifact', async (request, reply) => {
-    const item = artifacts(await findRun(request.params.name)).find(a => a.id === request.params.artifact);
+    const item = artifacts(await findRun(request, request.params.name)).find(a => a.id === request.params.artifact);
     if (!item || !/^[a-zA-Z0-9_.-]+$/.test(item.name)) throw missing();
     const result = await s3.download(item.key).catch(error => {
       if ((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404) throw missing();
@@ -330,15 +417,21 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
 
   const finished = (run: Workflow) => ['Succeeded', 'Failed', 'Error'].includes(run.status?.phase ?? '');
   app.post('/api/runs/:name/cancel', async (request: RunRequest) => {
-    const run = await findRun(request.params.name);
+    const run = await findRun(request, request.params.name);
+    const user = principal(request);
+    const job = entryFor(await catalog(), run);
+    if (user && !(run.metadata.annotations?.[starterAnnotation] === principalId(user) && permitted(request, 'run', job))) {
+      assertAction(request, 'manage', job);
+    }
     if (run.spec.shutdown === 'Terminate') return summary(run);
     if (finished(run)) throw conflict('Run has already finished');
     return summary(await argo.terminate(request.params.name));
   });
   app.post('/api/runs/:name/rerun', async (request: RunRequest, reply) => {
-    const run = await findRun(request.params.name);
+    const run = await findRun(request, request.params.name);
     if (!finished(run)) throw conflict('Run is still active');
     const job = await findJob(run.metadata.labels![jobIdLabel]);
+    assertAction(request, 'run', job);
     const templates = run.spec.templates as { inputs?: { artifacts?: Artifact[] } }[];
     const inputs = templates[0]?.inputs?.artifacts ?? [];
     const files = [];
@@ -359,10 +452,11 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
     try { values = validateValues(job, summary(run).parameters, new Set(files)); }
     catch (error) { throw bad((error as Error).message); }
     const name = `${job.id}-${randomBytes(6).toString('hex')}`;
-    return reply.code(201).send(summary(await createRun(job, name, values, files, await loadTemplate(job), inputRun)));
+    return reply.code(201).send(summary(await createRun(request, job, name, values, files, await loadTemplate(job), inputRun)));
   });
   app.delete('/api/runs/:name', async (request: RunRequest, reply) => {
-    const run = await findRun(request.params.name);
+    const run = await findRun(request, request.params.name);
+    assertAction(request, 'manage', entryFor(await catalog(), run));
     if (!finished(run)) throw conflict('Run is still active');
     await argo.remove(request.params.name, run.metadata.uid);
     return reply.code(204).send();
@@ -375,7 +469,15 @@ async function main() {
   if (mode === 'sync') return sync(ref || process.env.JOBS_REF || 'main');
   if (mode === 'init-storage') return storage().initialize();
   if (mode) throw new Error('Unknown command');
-  if (process.env.LOCAL_UNAUTHENTICATED !== 'true') throw new Error('Local mode must be enabled explicitly');
+  const issuer = process.env.OIDC_ISSUER;
+  const jwks = process.env.OIDC_JWKS;
+  const audience = process.env.OIDC_AUDIENCE;
+  const development = process.env.OIDC_DEV_MODE === 'true';
+  if (!issuer || !jwks || !audience || !process.env.LOCAL_ORIGINS ||
+      (!development && [issuer, jwks, ...process.env.LOCAL_ORIGINS.split(',')].some(url => new URL(url).protocol !== 'https:'))) {
+    throw new Error('Configure OIDC issuer, JWKS, audience and browser origin');
+  }
+  const authenticate = authenticator({ issuer, jwks, audience, groups: process.env.OIDC_GROUPS_CLAIM ?? 'groups' });
   const config = new KubeConfig();
   config.loadFromCluster();
   const namespace = process.env.NAMESPACE ?? 'job-console';
@@ -387,7 +489,7 @@ async function main() {
   const endpoint = process.env.ARGO_ENDPOINT;
   if (!endpoint) throw new Error('ARGO_ENDPOINT is required');
   const app = await buildApp(catalog, argoClient(endpoint, namespace), core,
-    config.makeApiClient(CustomObjectsApi), namespace);
+    config.makeApiClient(CustomObjectsApi), namespace, undefined, undefined, authenticate);
   await app.listen({ host: '0.0.0.0', port: 8080 });
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => void app.close());
 }

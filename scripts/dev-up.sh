@@ -50,6 +50,7 @@ fi
 k apply -f deploy/seeder.yaml
 ./scripts/deploy-jobs.sh
 k delete cronjobs.batch -l app.kubernetes.io/managed-by=job-console --cascade=orphan
+./scripts/init-local-identity.sh
 k apply -f deploy/launcher.yaml -f deploy/headlamp.yaml
 k rollout restart deployment/launcher deployment/headlamp
 k rollout status deployment/launcher --timeout=180s

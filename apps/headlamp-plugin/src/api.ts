@@ -10,12 +10,15 @@ export interface Parameter {
   accept?: string[];
   options?: { value: string; label: string }[];
 }
+export interface Account { id: string; displayName: string; admin: boolean }
 export interface Job {
   id: string;
   name: string;
   description: string;
   runtime: string;
+  allowed: ('view' | 'run' | 'approve' | 'manage')[];
   source?: { revision: string; ref?: string };
+  preview?: boolean;
   schedule?: { cron: string; timeZone: string };
   resolvedCron?: string;
 }
@@ -27,6 +30,7 @@ export interface Schedule {
   timeZone: string;
   resolvedCron: string;
   active: boolean | null;
+  canManage: boolean;
   lastSchedule?: string;
 }
 export interface Run {
@@ -42,6 +46,8 @@ export interface Run {
   reason?: string;
   parameters: Record<string, Value>;
   scheduled: boolean;
+  starter?: string;
+  starterName?: string;
 }
 
 const apiBase = import.meta.env.VITE_JOB_CONSOLE_API?.replace(/\/+$/, '') || '/job-console-api';

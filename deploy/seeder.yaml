@@ -75,6 +75,11 @@ spec:
           readOnlyRootFilesystem: true
           capabilities: {drop: [ALL]}
         volumeMounts: [{name: tmp, mountPath: /tmp}]
+      outputs:
+        parameters:
+          - name: revision
+            globalName: source-revision
+            valueFrom: {path: /tmp/source-revision, default: ""}
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: CronWorkflow

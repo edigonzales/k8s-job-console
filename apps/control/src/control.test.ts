@@ -66,7 +66,9 @@ test('cron resolves deterministic offsets and accepts Kubernetes grammar', () =>
 
 test('manual and cron use the same workflow and preserve literal values', () => {
   const scheduled = { ...parseJob({ ...base, parameters: [], schedule: { cron: 'H * * * *' } }), source };
-  assert.deepEqual(cronWorkflow(scheduled).spec.workflowSpec, workflow(scheduled, undefined, {}, []).spec);
+  const cron = cronWorkflow(scheduled);
+  assert.deepEqual(cron.spec.workflowSpec, workflow(scheduled, undefined, {}, []).spec);
+  assert.equal(cron.spec.workflowMetadata.annotations['job-console.io/trigger'], 'schedule');
   const literal = ['$(HOME)', '$HOME', '${HOME}', '{{workflow.name}}', '{{= 1 }}', '"', 'a\nb', 'Grüezi', ';'].join(' ');
   const spec = workflow(job, 'hello-run', { message: literal }, []).spec;
   const template = (spec.templates as {

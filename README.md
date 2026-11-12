@@ -25,15 +25,23 @@ Grossschreibung. Für **CSV analysieren** verwende `testdata/sample.csv` aus dem
 Job-Repository. **Zeitbericht** kann manuell gestartet werden und erscheint
 unter **Zeitpläne**. Das Design folgt dem Headlamp-Theme.
 
-Headlamp v0.46.0 und der Reverse Proxy lauschen auf Loopback im Pod. Der
-lokale Port-Forward macht beides unter einem Browser-Origin erreichbar.
-Der Proxy leitet `/job-console-api/` an den Launcher mit ClusterIP weiter.
-Die Plugin-Adresse lässt sich beim Build mit
-`VITE_JOB_CONSOLE_API=/anderer-proxy-pfad npm run plugin` konfigurieren.
-Passe dazu den Proxy-Pfad an. Im lokalen Modus bleiben Browser-Anfragen
-über einen anderen Origin gesperrt. Der Launcher ist ausdrücklich für
-lokalen Einzelbenutzerbetrieb konfiguriert. Für Mehrbenutzerbetrieb sind Authentisierung, Autorisierung,
-TLS und eine geeignete Secret-Verwaltung erforderlich.
+Headlamp v0.46.0, OAuth2 Proxy und der Launcher verwenden denselben
+Browser-Origin. OAuth2 Proxy schützt den Einstieg, und der Launcher
+prüft Signatur, Issuer, Ablauf und API-Audience des Access Tokens.
+Benutzer- und Gruppenrechte stehen im Job-Katalog. Eine explizite
+Benutzerkennung ist das JSON-Paar `["issuer","subject"]` als YAML-String.
+Gruppennamen werden exakt verglichen. Ein Start-, Freigabe- oder
+Verwaltungsrecht gewährt die notwendige Sichtbarkeit.
+
+Die lokale Installation importiert in Keycloak einen Test-Realm mit
+`admin`, `operator`, `reviewer`, `viewer` und `outsider`. Die zufällig
+erzeugten Passwörter stehen im Kubernetes Secret
+`job-console-local-realm` in `realm.json` unter `users`. Das Secret
+ist für den lokalen Rancher-Desktop-Namespace vorgesehen. Die
+Test-Sitzungen und Access Tokens laufen nach fünf Minuten ab.
+Für eine Installation ausserhalb der lokalen Entwicklung setzt der
+Launcher HTTPS-Origins, HTTPS-Issuer und HTTPS-JWKS voraus. Die
+lokale Keycloak-Konfiguration und Branch-Vorschau bleiben dort deaktiviert.
 
 `dev-up.sh` baut das generische GRETL-Image aus dem Runtime-Checkout und
 kennzeichnet den lokalen Build mit seiner Image-ID. Der offizielle

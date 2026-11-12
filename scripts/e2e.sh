@@ -3,7 +3,6 @@ set -euo pipefail
 source "$(dirname "$0")/local.sh"
 [[ $(namespace_owner) == job-console/job-console ]]
 api=http://127.0.0.1:4466/job-console-api/api
-curl -fsS "$api/jobs" >/dev/null
 temp=$(mktemp -d)
 fixtures=()
 cleanup() {
@@ -14,13 +13,17 @@ cleanup() {
 }
 trap cleanup EXIT
 npx playwright test
+umask 077
+node test/e2e/cookie.ts > "$temp/cookies"
+request() { curl --cookie "$temp/cookies" -H 'Origin: http://127.0.0.1:4466' "$@"; }
+request -fsS "$api/jobs" >/dev/null
 
 echo 'Streaming upload of 100 MiB'
 node -e 'for (let i = 0; i < 100; i++) process.stdout.write(("1,"+"x".repeat(125)+"\n").repeat(8192))' > "$temp/large.csv"
 [[ $(wc -c < "$temp/large.csv" | tr -d ' ') == 104857600 ]]
 rss() { k exec deploy/launcher -- awk '/VmRSS/{print $2}' /proc/1/status; }
 baseline=$(rss)
-curl --limit-rate 16m -fsS -F 'parameters={"hasHeader":false}' -F "inputFile=@$temp/large.csv" \
+request --limit-rate 16m -fsS -F 'parameters={"hasHeader":false}' -F "inputFile=@$temp/large.csv" \
   "$api/jobs/csv-analyzer/runs" > "$temp/run.json" &
 upload_pid=$!
 peak=$baseline
@@ -34,13 +37,13 @@ printf 'Launcher RSS baseline=%s KiB peak=%s KiB\n' "$baseline" "$peak"
 (( peak - baseline < 80 * 1024 ))
 large=$(jq -er .name "$temp/run.json")
 k wait --for=jsonpath='{.status.phase}'=Succeeded "workflow/$large" --timeout=150s
-id=$(curl -fsS "$api/runs/$large/artifacts" | jq -er '.[0].id')
-curl -fsS "$api/runs/$large/artifacts/$id" | jq -e '.records == 819200 and .columns == 2'
+id=$(request -fsS "$api/runs/$large/artifacts" | jq -er '.[0].id')
+request -fsS "$api/runs/$large/artifacts/$id" | jq -e '.records == 819200 and .columns == 2'
 
 echo 'Interrupted upload does not create a run'
 before=$(k get workflow -l job-console.io/job-id=csv-analyzer -o name | sort)
 set +e
-curl --limit-rate 8m --max-time 2 -sS -F 'parameters={"hasHeader":false}' -F "inputFile=@$temp/large.csv" \
+request --limit-rate 8m --max-time 2 -sS -F 'parameters={"hasHeader":false}' -F "inputFile=@$temp/large.csv" \
   "$api/jobs/csv-analyzer/runs" > "$temp/interrupted.json"
 status=$?
 set -e
@@ -58,10 +61,10 @@ echo 'Literal parameters and new run on repeat'
 literal='$(HOME) $HOME ${HOME} {{workflow.name}} {{= 1 }} "Grüezi";
 second line'
 hello=$(jq -nc --arg message "$literal" '{parameters:{message:$message}}' |
-  curl -fsS --json @- "$api/jobs/hello-gretl/runs" | jq -er .name)
+  request -fsS --json @- "$api/jobs/hello-gretl/runs" | jq -er .name)
 k wait --for=jsonpath='{.status.phase}'=Succeeded "workflow/$hello" --timeout=90s
-curl -fsS "$api/runs/$hello/logs" | jq -e --arg literal "$literal" '.logs | contains($literal)'
-repeat=$(curl -fsS -X POST "$api/runs/$hello/rerun" | jq -er .name)
+request -fsS "$api/runs/$hello/logs" | jq -e --arg literal "$literal" '.logs | contains($literal)'
+repeat=$(request -fsS -X POST "$api/runs/$hello/rerun" | jq -er .name)
 [[ $repeat != "$hello" ]]
 k wait --for=jsonpath='{.status.phase}'=Succeeded "workflow/$repeat" --timeout=90s
 
@@ -78,22 +81,22 @@ console.log(JSON.stringify(run));
 NODE
 fixtures+=("workflow/$missing")
 for ((i=0; i<45; i++)); do
-  phase=$(curl -fsS "$api/runs/$missing" | jq -er .status)
+  phase=$(request -fsS "$api/runs/$missing" | jq -er .status)
   [[ $phase != Failed ]] || break
   sleep 2
 done
 [[ $phase == Failed ]]
-curl -fsS "$api/runs/$missing/logs" | jq -er .logs | rg -i 'key does not exist|NoSuchKey'
+request -fsS "$api/runs/$missing/logs" | jq -er .logs | rg -i 'key does not exist|NoSuchKey'
 
 echo 'A manual run and a CronWorkflow wait for the same GRETL job mutex'
 holder=$(k create -f test/e2e/fixtures/wait-workflow.yaml -o jsonpath='{.metadata.name}')
 fixtures+=("workflow/$holder")
 k wait --for=jsonpath='{.status.phase}'=Running "workflow/$holder" --timeout=90s
 for ((i=0; i<45; i++)); do
-  if curl -fsS "$api/runs/$holder/logs" | jq -er .logs | rg 'waiting for cancellation'; then break; fi
+  if request -fsS "$api/runs/$holder/logs" | jq -er .logs | rg 'waiting for cancellation'; then break; fi
   sleep 2
 done
-manual=$(curl -fsS --json '{}' "$api/jobs/scheduled-report/runs" | jq -er .name)
+manual=$(request -fsS --json '{}' "$api/jobs/scheduled-report/runs" | jq -er .name)
 schedule=console-v2-test-$(openssl rand -hex 5)
 k get cronworkflow scheduled-report -o json |
   jq --arg name "$schedule" '{
@@ -111,15 +114,16 @@ done
 k patch cronworkflow "$schedule" --type=merge -p '{"spec":{"suspend":true}}' >/dev/null
 for name in "$manual" "$scheduled"; do
   for ((i=0; i<30; i++)); do
-    phase=$(curl -fsS "$api/runs/$name" | jq -er .status)
+    phase=$(request -fsS "$api/runs/$name" | jq -er .status)
     [[ $phase != Queued ]] || break
     sleep 2
   done
   [[ $phase == Queued ]]
   [[ -z $(k get pod -l "workflows.argoproj.io/workflow=$name" -o name) ]]
 done
-curl -fsS -X POST "$api/runs/$holder/cancel" | jq -e '.status == "Canceling" or .status == "Canceled"'
+k delete cronworkflow "$schedule" --cascade=orphan
+request -fsS -X POST "$api/runs/$holder/cancel"  | jq -e '.status == "Canceling" or .status == "Canceled"'
 k wait --for=jsonpath='{.status.phase}'=Succeeded "workflow/$manual" "workflow/$scheduled" --timeout=120s
-curl -fsS "$api/runs/$scheduled" | jq -e '.scheduled and .status == "Succeeded"'
+request -fsS "$api/runs/$scheduled" | jq -e '.scheduled and .status == "Succeeded"'
 
 echo 'Argo execution and browser checks passed on Rancher Desktop'

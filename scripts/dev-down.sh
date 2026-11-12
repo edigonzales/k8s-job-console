@@ -15,6 +15,7 @@ if [[ -n $(k get crd workflows.argoproj.io --ignore-not-found -o name) ]]; then
   fi
   k delete cronworkflows -l app.kubernetes.io/managed-by=job-console --cascade=orphan
 fi
+k delete -f deploy/local-identity.yaml --ignore-not-found
 k delete -f deploy/seeder.yaml --ignore-not-found
 k delete configmap job-console-sync --ignore-not-found
 k delete -f deploy/launcher.yaml -f deploy/headlamp.yaml -f deploy/argo-executor.yaml --ignore-not-found

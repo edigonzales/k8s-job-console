@@ -56,6 +56,7 @@ export async function sync(ref: string) {
     catch { throw new Error('Could not fetch the configured Git branch'); }
     git('checkout', '--detach', 'FETCH_HEAD');
     const revision = git('rev-parse', 'HEAD');
+    await writeFile('/tmp/source-revision', revision);
     await validateGitTree(checkout, git);
     const generated = await generateResources(checkout, { repository, image, revision, ref, gitSecret: authenticated ? 'job-console-git' : undefined }, ref !== main);
     const templates = resource('workflowtemplates');
@@ -99,7 +100,7 @@ export async function sync(ref: string) {
       const existing = await custom.listNamespacedCustomObject({ ...crons, labelSelector: selector }) as
         { items: { metadata: { name: string; uid: string } }[] };
       for (const item of existing.items) {
-        if (!generated.crons.some(cron => cron.metadata.name === item.metadata.name)) {
+        if (item.metadata.name !== 'job-console-sync' && !generated.crons.some(cron => cron.metadata.name === item.metadata.name)) {
           await custom.deleteNamespacedCustomObject({
             ...crons, name: item.metadata.name,
             body: { propagationPolicy: 'Orphan', preconditions: { uid: item.metadata.uid } },
@@ -126,7 +127,7 @@ export async function sync(ref: string) {
       ]);
       const cutoff = Date.now() - 30 * 86400_000;
       for (const template of stored) {
-        if (!used.has(template.metadata.name) && Date.parse(template.metadata.creationTimestamp ?? '') < cutoff) {
+        if (template.metadata.name !== 'job-console-sync' && !used.has(template.metadata.name) && Date.parse(template.metadata.creationTimestamp ?? '') < cutoff) {
           await custom.deleteNamespacedCustomObject({ ...templates, name: template.metadata.name,
             body: { preconditions: { uid: template.metadata.uid } } });
         }
@@ -145,7 +146,7 @@ export async function sync(ref: string) {
       }
       if (previous.metadata.labels?.[managedBy] !== 'job-console') throw new Error(`Schedule ownership conflict: ${name}`);
       await custom.replaceNamespacedCustomObject({ ...crons, name, dryRun, body: {
-        ...previous, metadata: { ...previous.metadata, labels: cron.metadata.labels },
+        ...previous, metadata: { ...previous.metadata, labels: { ...previous.metadata.labels, ...cron.metadata.labels } },
         spec: { ...cron.spec, suspend: previous.spec.suspend },
       } });
     }

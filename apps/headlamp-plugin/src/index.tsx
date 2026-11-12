@@ -7,7 +7,7 @@ import {
 } from '@kinvolk/headlamp-plugin/lib';
 import React, { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { Link, useHistory, useParams } from 'react-router-dom';
-import { api, prefix, type ResultFile, type Job, type JobDetail, launch, type Parameter, type Run, type Schedule, type Value } from './api';
+import { api, prefix, type ResultFile, type Account, type Job, type JobDetail, launch, type Parameter, type Run, type Schedule, type Value } from './api';
 
 const root = '/job-console';
 const statuses = ['Pending', 'Queued', 'Running', 'AwaitingInput', 'Canceling', 'Succeeded', 'Failed', 'Canceled', 'Rejected'] as const;
@@ -49,8 +49,15 @@ function Load<T>({ state, children }: { state: ReturnType<typeof useApi<T>>; chi
 }
 
 function Page({ title, children }: { title: string; children: ReactNode }) {
+  const account = useApi<Account>('/me');
   return <Stack spacing={2} sx={{ p: { xs: 2, md: 3 }, mx: 'auto', maxWidth: 1250 }}>
-    <Typography variant="h4" component="h1">{title}</Typography>
+    <Stack direction="row" spacing={1} alignItems="center" justifyContent="space-between">
+      <Typography variant="h4" component="h1">{title}</Typography>
+      {account.data && <Stack direction="row" alignItems="center" spacing={1}>
+        <Typography variant="body2">{account.data.displayName}</Typography>
+        <Button href="/oauth2/sign_out?rd=/signed-out">Abmelden</Button>
+      </Stack>}
+    </Stack>
     {children}
   </Stack>;
 }
@@ -84,7 +91,10 @@ function Jobs() {
         job.runtime,
         job.schedule ? <Link to={root + '/schedules'}>{job.schedule.cron}</Link> : '–',
         last ? <Link to={runLink(last.name)}><Status status={last.status} /></Link> : '–',
-        <Button component={Link} to={jobLink(job.id)} variant="outlined" aria-label={job.name + ' starten'}>Starten</Button>,
+        <Button component={Link} to={jobLink(job.id)} variant="outlined"
+          aria-label={job.name + (job.allowed.includes('run') ? ' starten' : ' Details')}>
+          {job.allowed.includes('run') ? 'Starten' : 'Details'}
+        </Button>,
       ] };
     })} />}</Load></Page>;
 }
@@ -185,7 +195,7 @@ function JobForm({ job }: { job: JobDetail }) {
   return <Stack component="form" onSubmit={submit} noValidate spacing={2} sx={{ maxWidth: 580 }}>
     <Typography>{job.description}</Typography>
     {job.source?.revision && <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
-      Git {job.source.ref && job.source.ref + ' · '}{job.source.revision}
+      Git {job.source.ref && job.source.ref + ' · '}{job.source.revision}{job.preview && ' · Vorschau'}
     </Typography>}
     {job.schedule && <Typography color="text.secondary">{job.schedule.cron} · {job.schedule.timeZone}</Typography>}
     {error && <Alert severity="error">{error}</Alert>}
@@ -212,7 +222,9 @@ function JobForm({ job }: { job: JobDetail }) {
 function JobDetails() {
   const { id } = useParams<{ id: string }>();
   const job = useApi<JobDetail>('/jobs/' + encodeURIComponent(id ?? ''));
-  return <Page title={job.data?.name ?? 'Job'}><Load state={job}>{data => <JobForm key={data.id} job={data} />}</Load></Page>;
+  return <Page title={job.data?.name ?? 'Job'}><Load state={job}>{data => data.allowed.includes('run')
+    ? <JobForm key={data.id} job={data} />
+    : <Typography>{data.description}</Typography>}</Load></Page>;
 }
 
 function duration(run: Run) {
@@ -258,6 +270,7 @@ function RunDetails() {
   const files = useApi<ResultFile[]>(path + '/artifacts', 3000);
   const job = useApi<JobDetail>('/jobs/' + encodeURIComponent(run.data?.jobId ?? ''));
   const jobs = useApi<Job[]>('/jobs');
+  const account = useApi<Account>('/me');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   async function updateRun(action: 'cancel' | 'delete' | 'repeat') {
@@ -281,7 +294,7 @@ function RunDetails() {
   }
   const jobName = jobs.data?.find(job => job.id === run.data?.jobId)?.name ?? run.data?.jobId;
   return <Page title={jobName ?? 'Ausführung'}><Load state={run}>{data => <>
-    <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>{data.name} · {date(data.started ?? data.created)}</Typography>
+    <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>{data.name} · {date(data.started ?? data.created)}{data.starterName && ' · ' + data.starterName}</Typography>
     {data.revision && <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
       Git {data.revision} · {data.image} · {data.scheduled ? 'Zeitplan' : 'Manuell'}
     </Typography>}
@@ -293,12 +306,13 @@ function RunDetails() {
     <Stack direction="row" spacing={1}>
       <Button variant="outlined" onClick={() => { run.refresh(); logs.refresh(); files.refresh(); }}>Aktualisieren</Button>
       {active(data)
-        ? <Button variant="outlined" color="warning" disabled={busy || data.status === 'Canceling'} onClick={() => updateRun('cancel')}>Abbrechen</Button>
+        ? (job.data?.allowed.includes('manage') || account.data?.admin ||
+            (job.data?.allowed.includes('run') && data.starter === account.data?.id)) && <Button variant="outlined" color="warning" disabled={busy || data.status === 'Canceling'} onClick={() => updateRun('cancel')}>Abbrechen</Button>
         : <>
-          <Button variant="outlined" disabled={busy} onClick={() => updateRun('repeat')}>Wiederholen</Button>
-          {job.data?.parameters.some(parameter => parameter.type === 'file') &&
+          {job.data?.allowed.includes('run') && <Button variant="outlined" disabled={busy} onClick={() => updateRun('repeat')}>Wiederholen</Button>}
+          {job.data?.allowed.includes('run') && job.data.parameters.some(parameter => parameter.type === 'file') &&
             <Button component={Link} to={jobLink(data.jobId)} variant="outlined">Mit neuer Datei starten</Button>}
-          <Button variant="outlined" color="error" disabled={busy} onClick={() => updateRun('delete')}>Löschen</Button>
+          {(job.data?.allowed.includes('manage') || account.data?.admin) && <Button variant="outlined" color="error" disabled={busy} onClick={() => updateRun('delete')}>Löschen</Button>}
         </>}
     </Stack>
     {Object.keys(data.parameters).length > 0 && <Box component="dl" sx={{ m: 0, overflowWrap: 'anywhere' }}>
@@ -327,12 +341,24 @@ function RunDetails() {
 
 function Schedules() {
   const state = useApi<Schedule[]>('/schedules', 5000);
-  return <Page title="Zeitpläne"><Load state={state}>{data => <Rows
-    headers={['Job', 'Cron', 'Aufgelöst', 'Zeitzone', 'Status', 'Letzter Start']}
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  async function change(item: Schedule) {
+    setError('');
+    setBusy(item.id);
+    try {
+      await api('/schedules/' + encodeURIComponent(item.id) + (item.active ? '/pause' : '/resume'), { method: 'POST' });
+      state.refresh();
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(''); }
+  }
+  return <Page title="Zeitpläne">{error && <Alert severity="error">{error}</Alert>}<Load state={state}>{data => <Rows
+    headers={['Job', 'Cron', 'Aufgelöst', 'Zeitzone', 'Status', 'Letzter Start', 'Aktion']}
     empty="Keine geplanten Jobs."
     rows={data.map(item => ({ key: item.id, cells: [<Link to={jobLink(item.id)}>{item.name}</Link>,
       item.cron, item.resolvedCron, item.timeZone, item.active === null ? 'Nicht bereitgestellt' : item.active ? 'Aktiv' : 'Suspendiert',
-      date(item.lastSchedule)] }))} />}</Load></Page>;
+      date(item.lastSchedule), item.canManage && item.active !== null &&
+        <Button disabled={Boolean(busy)} onClick={() => change(item)}>{item.active ? 'Pausieren' : 'Aktivieren'}</Button>] }))} />}</Load></Page>;
 }
 
 interface SyncStatus {
@@ -370,15 +396,15 @@ function Synchronizations() {
     <Typography>Letzter erfolgreicher Sync {date(data.runs.find(run => run.status === 'Succeeded')?.finished)}</Typography>
     {error && <Alert severity="error">{error}</Alert>}
     <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
-      <Button variant="contained" disabled={busy} onClick={() => start()}>Jetzt synchronisieren</Button>
+      <Button variant="contained" disabled={busy || data.runs.some(active)} onClick={() => start()}>Jetzt synchronisieren</Button>
       {data.previewEnabled && <>
         <TextField size="small" label="Vorschau-Branch" value={ref} onChange={event => setRef(event.target.value)} />
-        <Button variant="outlined" disabled={busy || !ref.trim()} onClick={() => start(ref.trim())}>Vorschau laden</Button>
+        <Button variant="outlined" disabled={busy || data.runs.some(active) || !ref.trim()} onClick={() => start(ref.trim())}>Vorschau laden</Button>
       </>}
     </Stack>
-    <Rows headers={['Versuch', 'Branch', 'Status', 'Details']} empty="Keine Synchronisationen."
+    <Rows headers={['Versuch', 'Branch', 'Revision', 'Status', 'Details']} empty="Keine Synchronisationen."
       rows={data.runs.map(run => ({ key: run.name, cells: [
-        date(run.started ?? run.created), run.ref, <Status status={run.status} />,
+        date(run.started ?? run.created), run.ref, run.revision ?? '–', <Status status={run.status} />,
         <Button onClick={() => setSelected(run.name)}>Protokoll</Button>,
       ] }))} />
     {selected && <Load state={details}>{result => result.logs &&
@@ -396,7 +422,11 @@ const pages = [
 ];
 for (const page of pages) {
   const name = 'job-console-' + page.name;
-  registerSidebarEntry({ parent: null, name, label: page.label, url: page.path, icon: page.icon, useClusterURL: false, sidebar });
+  const registerEntry = () => registerSidebarEntry({
+    parent: null, name, label: page.label, url: page.path, icon: page.icon, useClusterURL: false, sidebar,
+  });
+  if (page.name === 'deployment') void api<Account>('/me').then(account => { if (account.admin) registerEntry(); }).catch(() => {});
+  else registerEntry();
   registerRoute({ path: page.path, name, component: page.component, exact: true,
     useClusterURL: false, noAuthRequired: true, sidebar: { item: name, sidebar } });
 }
