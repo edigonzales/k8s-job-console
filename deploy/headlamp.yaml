@@ -36,9 +36,11 @@ data:
       }
       location = /oauth2/auth {
         internal;
+        client_max_body_size 1025m;
         proxy_pass http://job-console-oauth2-proxy:4180;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
+        proxy_set_header Expect "";
         proxy_set_header Authorization "";
         proxy_set_header Host $http_host;
         proxy_set_header X-Original-URI $request_uri;
