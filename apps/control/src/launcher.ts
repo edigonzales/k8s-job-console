@@ -6,7 +6,7 @@ import { CoreV1Api, CustomObjectsApi, KubeConfig, V1Pod } from '@kubernetes/clie
 import { validateValues } from './catalog.js';
 import { argoClient, type Artifact, type Workflow } from './argo.js';
 import { jobIdLabel, managedBy, workflow, parametersAnnotation, revisionAnnotation, imageAnnotation,
-  outputLabelsAnnotation, selector, templateName, type CatalogJob } from './workflows.js';
+  outputLabelsAnnotation, triggerAnnotation, selector, templateName, type CatalogJob } from './workflows.js';
 import { sync } from './sync.js';
 import { type Values } from './catalog.js';
 import { fileLimit, storage, totalLimit } from './storage.js';
@@ -44,7 +44,8 @@ function summary(run: Workflow, candidates: V1Pod[] = []) {
     created: run.metadata.creationTimestamp, started: run.status?.startedAt, finished: run.status?.finishedAt,
     revision: annotations[revisionAnnotation], image: annotations[imageAnnotation],
     parameters: JSON.parse(annotations[parametersAnnotation] ?? '{}'),
-    scheduled: run.metadata.ownerReferences?.some(owner => owner.kind === 'CronWorkflow') ?? false,
+    scheduled: annotations[triggerAnnotation] === 'schedule' ||
+      Boolean(run.metadata.ownerReferences?.some(owner => owner.kind === 'CronWorkflow')),
     steps: Object.values(run.status?.nodes ?? {}).filter(node => ['Pod', 'Suspend'].includes(node.type))
       .map(({ id, displayName, phase, message }) => ({ id, name: displayName, status: phase, reason: message })),
     ...runState(run, candidates),

@@ -8,6 +8,7 @@ export const selector = `${managedBy}=job-console`;
 export const revisionAnnotation = 'job-console.io/revision';
 export const imageAnnotation = 'job-console.io/runtime-image';
 export const parametersAnnotation = 'job-console.io/parameters';
+export const triggerAnnotation = 'job-console.io/trigger';
 export const outputLabelsAnnotation = 'job-console.io/output-labels';
 
 export interface Source {
@@ -124,7 +125,8 @@ export function cronWorkflow(job: CatalogJob) {
       concurrencyPolicy: 'Allow',
       successfulJobsHistoryLimit: 10080,
       failedJobsHistoryLimit: 10080,
-      workflowMetadata: { labels: run.metadata.labels, annotations: run.metadata.annotations },
+      workflowMetadata: { labels: run.metadata.labels,
+        annotations: { ...run.metadata.annotations, [triggerAnnotation]: 'schedule' } },
       workflowSpec: run.spec,
     },
   };
