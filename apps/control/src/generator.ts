@@ -15,8 +15,10 @@ export async function validateGitTree(root: string, git: (...args: string[]) => 
 }
 
 export async function generateResources(jobsDir: string, source: Source, preview = false) {
-  if (!/(?::[a-zA-Z0-9_.-]+|@sha256:[a-f0-9]{64})$/.test(source.image) || source.image.endsWith(':latest')) {
-    throw new Error('Set a versioned runtime image');
+  for (const image of [source.image, source.notifierImage].filter(value => value !== undefined)) {
+    if (!/(?::[a-zA-Z0-9_.-]+|@sha256:[a-f0-9]{64})$/.test(image) || image.endsWith(':latest')) {
+      throw new Error('Set a versioned runtime or notification image');
+    }
   }
   const root = join(jobsDir, 'jobs');
   const jobs: CatalogJob[] = [];

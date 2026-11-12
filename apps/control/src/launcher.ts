@@ -19,6 +19,9 @@ class HttpError extends Error {
 }
 const forbidden = () => new HttpError(403, 'Action not permitted');
 const starterAnnotation = 'job-console.io/started-by';
+const canceledByAnnotation = 'job-console.io/canceled-by';
+const canceledByNameAnnotation = 'job-console.io/canceled-by-name';
+const canceledAtAnnotation = 'job-console.io/canceled-at';
 const starterNameAnnotation = 'job-console.io/started-by-name';
 const bad = (message: string) => new HttpError(400, message);
 const missing = () => new HttpError(404, 'Job or run not found');
@@ -69,14 +72,21 @@ function summary(run: Workflow, candidates: V1Pod[] = []) {
     scheduled,
     starter: annotations[starterAnnotation] ?? (scheduled ? 'system:schedule' : undefined),
     starterName: annotations[starterNameAnnotation],
+    canceledBy: run.spec.shutdown === 'Terminate' ? annotations[canceledByAnnotation] : undefined,
+    canceledByName: run.spec.shutdown === 'Terminate' ? annotations[canceledByNameAnnotation] : undefined,
+    canceledAt: run.spec.shutdown === 'Terminate' ? annotations[canceledAtAnnotation] : undefined,
     approvals: Object.keys(definitions).flatMap(step => {
       const node = approvalNode(run, step);
       if (!node) return [];
       const output = nodeOutputs(node);
       return [{ step, ...definitions[step], phase: node.phase, decision: output.decision,
-        decidedBy: output.decidedByName, decidedAt: output.decidedAt, comment: output.comment }];
+        decidedBy: output.decidedByName, decidedAt: output.decidedAt, comment: output.comment,
+        values: Object.fromEntries(definitions[step].fields.flatMap(field => {
+          const stored = output[approvalField(field.name)];
+          return stored === undefined ? [] : [[field.name, JSON.parse(stored) as string]];
+        })) }];
     }),
-    steps: Object.values(run.status?.nodes ?? {}).filter(node => ['Pod', 'Suspend'].includes(node.type))
+    steps: Object.values(run.status?.nodes ?? {}).filter(node => ['Pod', 'Suspend'].includes(node.type) && node.templateName !== 'webhook')
       .map(({ id, displayName, phase, message }) => ({ id, name: displayName, status: phase, reason: message })),
     ...runState(run, candidates),
   };
@@ -84,7 +94,7 @@ function summary(run: Workflow, candidates: V1Pod[] = []) {
 
 export async function buildApp(catalogSource: CatalogEntry[] | (() => Promise<CatalogEntry[]>), argo: ReturnType<typeof argoClient>, core: CoreV1Api,
   custom: CustomObjectsApi, namespace: string, authenticate: ReturnType<typeof authenticator>,
-  s3: Pick<ReturnType<typeof storage>, 'upload' | 'remove' | 'download' | 'stat'> = storage(),
+  s3: Pick<ReturnType<typeof storage>, 'upload' | 'remove' | 'download' | 'stat' | 'copyInput'> = storage(),
   limits = { file: fileLimit, total: totalLimit }) {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' }, bodyLimit: 256 * 1024 });
   await app.register(multipart, { limits: { fileSize: limits.file, fieldSize: 256 * 1024, parts: 33, headerPairs: 32 } });
@@ -165,8 +175,8 @@ export async function buildApp(catalogSource: CatalogEntry[] | (() => Promise<Ca
     }
     return template.spec;
   }
-  function createRun(request: FastifyRequest, job: CatalogEntry, name: string, values: Values, files: string[], template?: Workflow['spec'], inputRun?: string) {
-    const run = workflow(job, name, values, files, inputRun ?? name);
+  function createRun(request: FastifyRequest, job: CatalogEntry, name: string, values: Values, files: string[], template?: Workflow['spec']) {
+    const run = workflow(job, name, values, files);
     const user = principal(request);
     if (user) Object.assign(run.metadata.annotations!, {
       [starterAnnotation]: principalId(user), [starterNameAnnotation]: user.displayName,
@@ -188,7 +198,7 @@ export async function buildApp(catalogSource: CatalogEntry[] | (() => Promise<Ca
     return argo.create({ ...run, spec: template });
   }
 
-  const publicSource = ({ gitSecret: _secret, ...source }: Source) => source;
+  const publicSource = ({ gitSecret: _git, notifierSecret: _webhook, ...source }: Source) => source;
   const syncLabel = 'job-console.io/sync';
   const syncRef = process.env.JOBS_REF ?? 'main';
   const previewEnabled = process.env.ALLOW_PREVIEW === 'true' && process.env.OIDC_DEV_MODE === 'true';
@@ -537,6 +547,21 @@ export async function buildApp(catalogSource: CatalogEntry[] | (() => Promise<Ca
     }
     if (run.spec.shutdown === 'Terminate') return summary(run);
     if (finished(run)) throw conflict('Run has already finished');
+    if (user && !run.metadata.annotations?.[canceledByAnnotation]) {
+      await custom.patchNamespacedCustomObject({
+        group: 'argoproj.io', version: 'v1alpha1', plural: 'workflows', namespace, name: request.params.name,
+        body: [
+          { op: 'test', path: '/metadata/resourceVersion', value: run.metadata.resourceVersion },
+          { op: 'add', path: '/metadata/annotations', value: {
+            ...run.metadata.annotations, [canceledByAnnotation]: principalId(user),
+            [canceledByNameAnnotation]: user.displayName, [canceledAtAnnotation]: new Date().toISOString(),
+          } },
+        ],
+      }).catch(error => {
+        if ([409, 422].includes(kubeCode(error) ?? 0)) throw conflict('The run changed. Refresh and try again.');
+        throw error;
+      });
+    }
     return summary(await argo.terminate(request.params.name));
   });
   app.post('/api/runs/:name/rerun', async (request: RunRequest, reply) => {
@@ -547,24 +572,40 @@ export async function buildApp(catalogSource: CatalogEntry[] | (() => Promise<Ca
     const templates = run.spec.templates as { inputs?: { artifacts?: Artifact[] } }[];
     const inputs = templates[0]?.inputs?.artifacts ?? [];
     const inputFiles = JSON.parse(run.metadata.annotations?.[inputFilesAnnotation] ?? '{}') as Record<string, string>;
-    const files = [];
-    let inputRun: string | undefined;
+    const files = new Map<string, string>();
     for (const field of job.parameters.filter(parameter => parameter.type === 'file')) {
       const key = inputFiles[field.name] ?? inputs.find(item => item.name === 'upload-' + field.name)?.s3?.key;
       if (!key) continue;
       const match = key && /^runs\/([a-z0-9][a-z0-9-]{0,62})\/inputs\/([a-zA-Z0-9_]+)$/.exec(key);
-      if (!match || match[2] !== field.name || (inputRun && inputRun !== match[1]) ||
+      if (!match || match[2] !== field.name ||
           run.metadata.annotations?.[revisionAnnotation] !== job.source.revision || !(await s3.stat(key!)).available) {
         throw conflict('Select the input files again');
       }
-      inputRun = match[1];
-      files.push(field.name);
+      files.set(field.name, key);
     }
     let values;
-    try { values = validateValues(job, summary(run).parameters, new Set(files)); }
+    try { values = validateValues(job, summary(run).parameters, new Set(files.keys())); }
     catch (error) { throw bad((error as Error).message); }
     const name = `${job.id}-${randomBytes(6).toString('hex')}`;
-    return reply.code(201).send(summary(await createRun(request, job, name, values, files, await loadTemplate(job), inputRun)));
+    const template = await loadTemplate(job);
+    const copied: string[] = [];
+    let creating = false;
+    try {
+      for (const [field, source] of files) {
+        copied.push(field);
+        await s3.copyInput(source, name, field);
+      }
+      assertAction(request, 'run', await findJob(job.id));
+      creating = true;
+      return reply.code(201).send(summary(await createRun(request, job, name, values, [...files.keys()], template)));
+    } catch (error) {
+      const code = kubeCode(error);
+      if (!creating || (code && code >= 400 && code < 500 && code !== 409)) {
+        const cleanup = await Promise.allSettled(copied.map(field => s3.remove(name, field)));
+        if (cleanup.some(result => result.status === 'rejected')) request.log.warn('Could not clean up all copied inputs');
+      }
+      throw error;
+    }
   });
   app.delete('/api/runs/:name', async (request: RunRequest, reply) => {
     const run = await findRun(request, request.params.name);

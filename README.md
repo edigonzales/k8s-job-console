@@ -92,7 +92,10 @@ Workflow-Controller voraus. Die Console behält abgeschlossene Workflows
 sieben Tage. Sie zeigt die Git-Revision, das Runtime-Image, Logs und
 verfügbare Ergebnisdateien. **Abbrechen** terminiert über Argo.
 **Wiederholen** startet einen neuen Lauf mit dem aktuellen Katalogstand.
-Bei Dateieingaben führt der Link zurück zum Startformular.
+Dateieingaben werden für den neuen Lauf unter einem eigenen RustFS-Schlüssel
+kopiert. Die aktuell gültigen Startrechte und Eingaben werden erneut geprüft.
+Freigaben beginnen wieder offen. Zeitplanpausen bleiben bei Git-Synchronisationen
+erhalten. Beim Entfernen eines Zeitplans laufen bereits angelegte Workflows weiter.
 
 ## Folgejobs und Freigaben
 
@@ -112,6 +115,20 @@ Startarten und Quellrevisionen. Eine separate Ablauf-Sperre schützt
 serielle Abläufe während der Freigabewartezeit. Gemeinsame Datenbestände
 aus realen Fachsystemen brauchen eine passende fachliche Isolation.
 
+## Benachrichtigungen
+
+Optional sendet die Console bei einer Freigabeanforderung oder bei einem
+technisch fehlgeschlagenen Workflow eine JSON-Nachricht per HTTP POST.
+Der lokale Start mit `WEBHOOK_ENABLED=true ./scripts/dev-up.sh` aktiviert
+die Schritte in neu erzeugten Workflows. Die administrative Konfiguration
+liegt im Secret `job-console-webhook` mit `WEBHOOK_URL`, optional
+`WEBHOOK_TOKEN` und der öffentlichen Browseradresse `CONSOLE_PUBLIC_URL`.
+Die Nachricht enthält Ereignis, Job, Lauf, Revision, Status und den Link
+zum Lauf. Der Empfänger erhält keine Jobparameter, Dateiinhalte oder
+Speicherzugangsdaten. Der Versand versucht die Zustellung höchstens zweimal
+und wird in den Workflow-Logs ausgewiesen. Der fachliche Status bleibt
+bei einem Zustellfehler erhalten.
+
 ## Tests und Fehlerdiagnose
 
 ```sh
@@ -125,7 +142,7 @@ npx playwright install chromium
 
 Der E2E-Test braucht eine laufende lokale Installation und den Port-Forward.
 Er prüft reale GRETL-Läufe, Browserdownloads, Streaming-Uploads,
-Abbruch und gemeinsame Sperren. Der V2-0-Durchstich
+Abbruch, gemeinsame Sperren, Anmeldung, Freigaben und Webhooks. Der V2-0-Durchstich
 `./scripts/argo-smoke.sh` braucht zusätzlich das Runtime-Image
 `job-console-gretl:18eaf3254a16`, gebaut vom Runtime-Commit
 `18eaf3254a16c121362b78406be7c01c95f152c7`.

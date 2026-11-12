@@ -40,10 +40,17 @@ if ! k wait --for=condition=complete "$init" --timeout=100s; then
   exit 1
 fi
 ./scripts/install-argo.sh
+notifier_image=''
+if [[ ${WEBHOOK_ENABLED:-false} == true ]]; then
+  notifier_id=$(docker image inspect job-console-control:local --format '{{.Id}}')
+  notifier_id=${notifier_id#sha256:}
+  notifier_image=job-console-control:${notifier_id:0:12}
+  docker tag job-console-control:local "$notifier_image"
+fi
 k create configmap job-console-sync --dry-run=client -o yaml \
   --from-literal=JOBS_REPOSITORY="${JOBS_REPOSITORY:-https://github.com/edigonzales/gretl-runtime-jobs.git}" \
   --from-literal=JOBS_REF="${JOBS_REF:-feature/v2-job-console}" \
-  --from-literal=GRETL_IMAGE="$GRETL_IMAGE" --from-literal=ALLOW_PREVIEW=true | k apply -f -
+  --from-literal=GRETL_IMAGE="$GRETL_IMAGE" --from-literal=NOTIFIER_IMAGE="$notifier_image" --from-literal=OIDC_DEV_MODE=true --from-literal=ALLOW_PREVIEW=true | k apply -f -
 if k get configmap job-console-catalog >/dev/null 2>&1; then
   k label configmap job-console-catalog app.kubernetes.io/managed-by=job-console
 fi

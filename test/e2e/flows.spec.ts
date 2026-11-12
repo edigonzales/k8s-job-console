@@ -28,6 +28,7 @@ async function wait(actor: Page, name: string, status: string) {
 }
 
 test('a separate reviewer approves the pinned CSV and the decision survives restarts', async ({ browser, page }) => {
+  test.setTimeout(210_000);
   await signIn(page, 'admin');
   await page.goto(base + '/job-console/jobs/csv-publication');
   await page.getByLabel('CSV-Datei').setInputFiles(sample);
@@ -39,6 +40,11 @@ test('a separate reviewer approves the pinned CSV and the decision survives rest
   expect((await page.request.post(api + '/jobs/publish-csv/runs', { headers: origin, data: {} })).status()).toBe(404);
   expect(kubectl('get', 'pod', '-l', 'workflows.argoproj.io/workflow=' + name,
     '-o', 'jsonpath={.items[*].status.phase}')).not.toMatch(/Running|Pending/);
+  const queued = await start(page);
+  await wait(page, queued, 'Queued');
+  expect(kubectl('get', 'pod', '-l', 'workflows.argoproj.io/workflow=' + queued, '-o', 'name').trim()).toBe('');
+  expect((await page.request.post(runURL(queued) + '/cancel', { headers: origin })).status()).toBe(200);
+  await wait(page, queued, 'Canceled');
   for (const deployment of ['launcher', 'workflow-controller']) kubectl('rollout', 'restart', 'deployment/' + deployment);
   for (const deployment of ['launcher', 'workflow-controller']) kubectl('rollout', 'status', 'deployment/' + deployment, '--timeout=90s');
   const reviewer = await browser.newPage();
@@ -60,6 +66,18 @@ test('a separate reviewer approves the pinned CSV and the decision survives rest
     });
     expect((await (await reviewer.request.get(runURL(name))).json()).steps
       .filter((step: { name: string }) => step.name === 'publish')).toHaveLength(1);
+    const rerun = await page.request.post(runURL(name) + '/rerun', { headers: origin });
+    expect(rerun.status()).toBe(201);
+    const next = (await rerun.json()).name as string;
+    expect(next).not.toBe(name);
+    await wait(page, next, 'AwaitingInput');
+    expect((await (await page.request.get(runURL(next))).json()).approvals[0].decision).toBeUndefined();
+    const inputKeys = (id: string) => JSON.parse(JSON.parse(kubectl('get', 'workflow', id, '-o', 'json'))
+      .metadata.annotations['job-console.io/input-files']);
+    expect(inputKeys(next).inputFile).toBe('runs/' + next + '/inputs/inputFile');
+    expect(inputKeys(next).inputFile).not.toBe(inputKeys(name).inputFile);
+    await page.request.post(runURL(next) + '/cancel', { headers: origin });
+    await wait(page, next, 'Canceled');
   } finally { await reviewer.close(); }
 });
 
@@ -106,6 +124,9 @@ test('deadline and cancellation prevent approval of a waiting workflow', async (
     await wait(page, canceled, 'AwaitingInput');
     expect((await page.request.post(runURL(canceled) + '/cancel', { headers: origin })).status()).toBe(200);
     await wait(page, canceled, 'Canceled');
+    const audit = await (await page.request.get(runURL(canceled))).json();
+    expect(audit.canceledBy).toBe(audit.starter);
+    expect(Date.parse(audit.canceledAt)).toBeGreaterThan(Date.parse(audit.created));
     expect((await reviewer.request.post(decisionURL(canceled), { headers: origin, data: approve })).status()).toBe(409);
     for (const name of [expired, canceled]) {
       expect((await (await page.request.get(runURL(name))).json()).steps

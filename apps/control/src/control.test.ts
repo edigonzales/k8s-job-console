@@ -146,7 +146,8 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
     remove: async () => ({}),
   } as unknown as ReturnType<typeof argoClient>;
   const core = { listNamespacedPod: async () => ({ items: [] }) } as unknown as CoreV1Api;
-  const s3: Pick<ReturnType<typeof storage>, 'upload' | 'remove' | 'download' | 'stat'> = {
+  const s3: Pick<ReturnType<typeof storage>, 'upload' | 'remove' | 'download' | 'stat' | 'copyInput'> = {
+    copyInput: async () => { throw new Error('Unexpected copied input'); },
     stat: async () => { throw new Error('Unexpected artifact'); },
     download: async () => { throw new Error('Unexpected download'); },
     upload: async (name, field, source, count) => {
@@ -164,7 +165,8 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
   const authenticate = async () => ({
     issuer: 'https://example.org', subject: 'test', displayName: 'Test', groups: ['test-users'],
   });
-  const app = await buildApp([job, fileJob], argo, core, {} as CustomObjectsApi, 'job-console', authenticate, s3, { file: 12, total: 15 });
+  const custom = { patchNamespacedCustomObject: async () => ({}) } as unknown as CustomObjectsApi;
+  const app = await buildApp([job, fileJob], argo, core, custom, 'job-console', authenticate, s3, { file: 12, total: 15 });
   t.after(() => app.close());
   const send = (id: string, payload: unknown, requestOrigin = origin) => app.inject({
     method: 'POST', url: '/api/jobs/' + id + '/runs', headers: { origin: requestOrigin },

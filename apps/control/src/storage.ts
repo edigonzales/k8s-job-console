@@ -1,6 +1,6 @@
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
-import { S3Client, GetObjectCommand, CreateBucketCommand, HeadBucketCommand, HeadObjectCommand, DeleteObjectCommand,
+import { S3Client, GetObjectCommand, CreateBucketCommand, HeadBucketCommand, HeadObjectCommand, CopyObjectCommand, DeleteObjectCommand,
   PutBucketLifecycleConfigurationCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 
@@ -37,6 +37,10 @@ export function storage() {
       // settle after cleanup, even when an S3 request was already in flight.
       const results = await Promise.allSettled([pipeline(source, meter, { signal }), sending]);
       for (const result of results) if (result.status === 'rejected') throw result.reason;
+    },
+    async copyInput(source: string, name: string, field: string) {
+      const copySource = [bucket, ...source.split('/')].map(encodeURIComponent).join('/');
+      await client.send(new CopyObjectCommand({ Bucket: bucket, Key: inputKey(name, field), CopySource: copySource }));
     },
     async remove(name: string, field: string) {
       await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: inputKey(name, field) }));

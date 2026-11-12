@@ -44,6 +44,7 @@ export interface Approval {
   decidedAt?: string;
   decidedBy?: string;
   comment?: string;
+  values?: Record<string, string>;
   canApprove?: boolean;
   canDecide?: boolean;
 }
@@ -63,6 +64,9 @@ export interface Run {
   scheduled: boolean;
   starter?: string;
   starterName?: string;
+  canceledBy?: string;
+  canceledByName?: string;
+  canceledAt?: string;
 }
 
 const apiBase = import.meta.env.VITE_JOB_CONSOLE_API?.replace(/\/+$/, '') || '/job-console-api';

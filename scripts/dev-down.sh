@@ -8,15 +8,18 @@ case $(namespace_owner) in
   *) echo 'Namespace job-console is not owned by Job Console.' >&2; exit 1 ;;
 esac
 if [[ -n $(k get crd workflows.argoproj.io --ignore-not-found -o name) ]]; then
-  if k get workflows -l 'app.kubernetes.io/managed-by=job-console,job-console.io/test-fixture!=true' -o json |
-      jq -e 'any(.items[]; (.status.phase // "") as $phase | ["Succeeded","Failed","Error"] | index($phase) == null)' >/dev/null; then
-    echo 'Wait for active Console workflows to finish or terminate them first.' >&2
-    exit 1
-  fi
+  for label in app.kubernetes.io/managed-by=job-console job-console.io/sync=true; do
+    if k get workflows -l "$label,job-console.io/test-fixture!=true" -o json |
+        jq -e 'any(.items[]; (.status.phase // "") as $phase | ["Succeeded","Failed","Error"] | index($phase) == null)' >/dev/null; then
+      echo 'Wait for active Console workflows to finish or terminate them first.' >&2
+      exit 1
+    fi
+  done
   k delete cronworkflows -l app.kubernetes.io/managed-by=job-console --cascade=orphan
+  k delete cronworkflow job-console-sync --ignore-not-found --cascade=orphan
+  k delete -f deploy/seeder.yaml --ignore-not-found
 fi
 k delete -f deploy/local-identity.yaml --ignore-not-found
-k delete -f deploy/seeder.yaml --ignore-not-found
 k delete configmap job-console-sync --ignore-not-found
 k delete -f deploy/launcher.yaml -f deploy/headlamp.yaml -f deploy/argo-executor.yaml --ignore-not-found
 k delete deployment/rustfs service/rustfs deployment/argo-server service/argo-server deployment/workflow-controller --ignore-not-found

@@ -275,7 +275,11 @@ function ApprovalForm({ approval, path, refresh }: { approval: Approval; path: s
     try {
       await api(path + '/approvals/' + encodeURIComponent(approval.step) + '/decision', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ decision, values, comment }),
+        body: JSON.stringify({ decision, comment, values: Object.fromEntries(approval.fields.flatMap(field => {
+          const value = values[field.name];
+          if (value === undefined || (field.type === 'integer' && value === '')) return [];
+          return [[field.name, field.type === 'integer' ? Number(value) : value]];
+        })) }),
       });
       refresh();
     } catch (cause) { setError((cause as Error).message); }
@@ -289,6 +293,8 @@ function ApprovalForm({ approval, path, refresh }: { approval: Approval; path: s
         {approval.decision === 'approved' ? 'Freigegeben' : 'Abgelehnt'} · {approval.decidedBy} · {date(approval.decidedAt)}
         {approval.comment && ' · ' + approval.comment}
       </Typography>}
+      {approval.decision && approval.fields.map(field => approval.values?.[field.name] !== undefined && approval.values[field.name] !== '' && <Typography
+        key={field.name} variant="body2">{field.label} · {approval.values[field.name]}</Typography>)}
       {approval.phase === 'Running' && approval.canApprove && !approval.canDecide &&
         <Alert severity="info">Du hast diese Ausführung gestartet.</Alert>}
       {approval.canDecide && <>
@@ -359,6 +365,7 @@ function RunDetails() {
       <Status status={data.status} />
       {data.reason && <Typography>{data.reason}</Typography>}
     </Stack>
+    {data.canceledAt && <Typography variant="body2">Abbruch angefordert · {data.canceledByName ?? data.canceledBy} · {date(data.canceledAt)}</Typography>}
     {error && <Alert severity="error">{error}</Alert>}
     <Stack direction="row" spacing={1}>
       <Button variant="outlined" onClick={() => { run.refresh(); logs.refresh(); files.refresh(); }}>Aktualisieren</Button>

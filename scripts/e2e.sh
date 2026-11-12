@@ -126,4 +126,8 @@ request -fsS -X POST "$api/runs/$holder/cancel"  | jq -e '.status == "Canceling"
 k wait --for=jsonpath='{.status.phase}'=Succeeded "workflow/$manual" "workflow/$scheduled" --timeout=120s
 request -fsS "$api/runs/$scheduled" | jq -e '.scheduled and .status == "Succeeded"'
 
+node test/e2e/production-preview.ts
+node test/e2e/tokens.ts
+node test/e2e/large-download.ts
+node test/e2e/webhook.ts
 echo 'Argo execution and browser checks passed on Rancher Desktop'

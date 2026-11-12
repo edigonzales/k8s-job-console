@@ -21,6 +21,8 @@ export interface Source {
   image: string;
   ref?: string;
   gitSecret?: string;
+  notifierImage?: string;
+  notifierSecret?: string;
 }
 
 export type CatalogJob = Job & { source: Source; successor?: Job; kind?: 'job' };
@@ -28,8 +30,11 @@ export type CatalogFlow = Flow & { source: Source; jobs: Job[]; kind: 'flow'; ex
 export type CatalogEntry = CatalogJob | CatalogFlow;
 
 export function templateName(job: CatalogEntry) {
-  const imageVersion = job.source.image.split(':').pop()!.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 12);
-  return `${job.id}-${job.source.revision.slice(0, 12)}-${imageVersion}`.replace(/-+$/g, '');
+  const imageTag = (image: string) => image.split(':').pop()!.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 12);
+  const imageVersion = imageTag(job.source.image);
+  const notifier = job.source.notifierImage ? '-notify-' + imageTag(job.source.notifierImage) : '';
+  const secret = job.source.notifierSecret ? '-' + job.source.notifierSecret : '';
+  return `${job.id}-${job.source.revision.slice(0, 12)}-${imageVersion}${notifier}${secret}`.replace(/-+$/g, '');
 }
 
 const restricted = {
@@ -82,8 +87,8 @@ function taskTemplate(job: Job, name: string, source: Source, bindings: Bindings
   };
 }
 
-export function workflow(entry: CatalogEntry, name: string | undefined, values: Values, files: string[], inputRun = name): Workflow {
-  const uploaded = Object.fromEntries(files.map(field => [field, inputKey(inputRun!, field)]));
+export function workflow(entry: CatalogEntry, name: string | undefined, values: Values, files: string[]): Workflow {
+  const uploaded = Object.fromEntries(files.map(field => [field, inputKey(name!, field)]));
   const outputLabels: Record<string, string> = {};
   const approvals: Record<string, Approval> = {};
   const steps: Record<string, unknown>[][] = [];
@@ -97,6 +102,11 @@ export function workflow(entry: CatalogEntry, name: string | undefined, values: 
     for (const output of job.outputs) outputLabels[`${step}.${output.name}`] = output.label;
   }
 
+  const notifierImage = entry.source.notifierImage;
+  const notice = (name: string, event: string, status: string) => ({
+    name, template: 'webhook', continueOn: { failed: true, error: true },
+    arguments: { parameters: [{ name: 'event', value: event }, { name: 'status', value: status }] },
+  });
   if (entry.kind === 'flow') {
     for (const step of entry.steps) {
       if ('approval' in step) {
@@ -107,6 +117,7 @@ export function workflow(entry: CatalogEntry, name: string | undefined, values: 
             ...step.approval.fields.map(field => approvalField(field.name))]
             .map(name => ({ name, valueFrom: { supplied: {} } })) },
         });
+        if (notifierImage) steps.push([notice('notify--' + step.id, 'approval_required', 'AwaitingInput')]);
         steps.push([{ name: step.id, template: 'step-' + step.id }]);
         continue;
       }
@@ -138,14 +149,34 @@ export function workflow(entry: CatalogEntry, name: string | undefined, values: 
     }
   } else {
     const bindings = { values: encodeValues(values), artifacts: files.map(field => upload(field, uploaded[field])) };
-    addTask(entry, 'process', bindings);
-    for (const output of entry.outputs) outputLabels[output.name] = output.label;
     if (entry.successor) {
-      addTask(entry.successor, 'successor', { values: encodeValues(validateValues(entry.successor, {})), artifacts: [] });
-      steps.push([{ name: 'process', template: 'process' }], [{ name: 'successor', template: 'successor' }]);
+      addTask(entry, entry.id, bindings, [], 'process');
+      addTask(entry.successor, entry.successor.id,
+        { values: encodeValues(validateValues(entry.successor, {})), artifacts: [] }, [], 'successor');
+      steps.push([{ name: entry.id, template: 'process' }], [{ name: entry.successor.id, template: 'successor' }]);
+    } else {
+      addTask(entry, 'process', bindings);
+      for (const output of entry.outputs) outputLabels[output.name] = output.label;
     }
   }
   if (steps.length) templates.unshift({ name: 'sequence', steps });
+  if (notifierImage) templates.push({
+    name: 'webhook',
+    inputs: { parameters: [{ name: 'event' }, { name: 'status' }] },
+    container: {
+      image: notifierImage, imagePullPolicy: 'IfNotPresent',
+      command: ['node', '/app/build/control/notify.js'],
+      args: [ '{{inputs.parameters.event}}', entry.id, encodeURIComponent(entry.name),
+        '{{workflow.name}}', entry.source.revision, '{{inputs.parameters.status}}'],
+      envFrom: [{ secretRef: { name: entry.source.notifierSecret ?? 'job-console-webhook', optional: true } }],
+      securityContext: restricted,
+      resources: { requests: { cpu: '25m', memory: '32Mi' }, limits: { cpu: '250m', memory: '128Mi' } },
+    },
+  }, {
+    name: 'notify-exit',
+    steps: [[{ ...notice('notify--failure', 'workflow_failed', '{{workflow.status}}'),
+      when: '{{workflow.status}} == Failed || {{workflow.status}} == Error' }]],
+  });
 
   return {
     apiVersion: 'argoproj.io/v1alpha1',
@@ -166,6 +197,7 @@ export function workflow(entry: CatalogEntry, name: string | undefined, values: 
       automountServiceAccountToken: false,
       executor: { serviceAccountName: 'job-console-executor' },
       entrypoint: steps.length ? 'sequence' : 'process',
+      onExit: notifierImage ? 'notify-exit' : undefined,
       activeDeadlineSeconds: entry.execution.timeoutSeconds,
       synchronization: entry.kind === 'flow' && entry.execution.serial ? { mutexes: [{ name: 'flow-' + entry.id }] } : undefined,
       ttlStrategy: { secondsAfterCompletion: 604800 },

@@ -1,0 +1,37 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: job-console-test-webhook
+  labels: {job-console.io/test-fixture: "true"}
+spec:
+  selector: {matchLabels: {app: job-console-test-webhook}}
+  template:
+    metadata: {labels: {app: job-console-test-webhook}}
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: receiver
+          image: node:22-bookworm-slim
+          command: [node, -e]
+          args:
+            - |
+              require('node:http').createServer(async (req, res) => {
+                if (req.method === 'GET') { res.writeHead(200).end(); return; }
+                const chunks = [];
+                for await (const chunk of req) chunks.push(chunk);
+                const event = JSON.parse(Buffer.concat(chunks).toString());
+                const status = event.event === 'approval_required' ? 503 : 202;
+                console.log(JSON.stringify({ event, status }));
+                res.writeHead(status).end();
+              }).listen(8080, '0.0.0.0');
+          ports: [{name: http, containerPort: 8080}]
+          readinessProbe: {httpGet: {path: /, port: http}, periodSeconds: 2}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: job-console-test-webhook
+  labels: {job-console.io/test-fixture: "true"}
+spec:
+  selector: {app: job-console-test-webhook}
+  ports: [{name: http, port: 8080}]

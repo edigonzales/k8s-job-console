@@ -17,10 +17,16 @@ export async function sync(ref: string) {
   const repository = process.env.JOBS_REPOSITORY;
   const main = process.env.JOBS_REF ?? 'main';
   const image = process.env.GRETL_IMAGE;
+  const notifierImage = process.env.NOTIFIER_IMAGE || undefined;
+  const notifierSecret = notifierImage ? process.env.NOTIFIER_SECRET_NAME || undefined : undefined;
+  if (notifierSecret && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(notifierSecret)) {
+    throw new Error('Invalid webhook secret name');
+  }
   const namespace = process.env.NAMESPACE ?? 'job-console';
   if (!repository || !image) throw new Error('JOBS_REPOSITORY and GRETL_IMAGE are required');
+  const allowPreview = process.env.ALLOW_PREVIEW === 'true' && process.env.OIDC_DEV_MODE === 'true';
   if (!previewRef.test(ref) || ref.startsWith('-') || ref.includes('..') ||
-      (ref !== main && process.env.ALLOW_PREVIEW !== 'true')) throw new Error('Git branch is not allowed');
+      (ref !== main && !allowPreview)) throw new Error('Git branch is not allowed');
   const url = new URL(repository);
   if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
     throw new Error('Expected a Git HTTP(S) URL without credentials');
@@ -58,7 +64,7 @@ export async function sync(ref: string) {
     const revision = git('rev-parse', 'HEAD');
     await writeFile('/tmp/source-revision', revision);
     await validateGitTree(checkout, git);
-    const generated = await generateResources(checkout, { repository, image, revision, ref, gitSecret: authenticated ? 'job-console-git' : undefined }, ref !== main);
+    const generated = await generateResources(checkout, { repository, image, revision, ref, notifierImage, notifierSecret, gitSecret: authenticated ? 'job-console-git' : undefined }, ref !== main);
     const templates = resource('workflowtemplates');
     const crons = resource('cronworkflows');
     for (const template of generated.templates) {
