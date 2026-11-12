@@ -17,6 +17,9 @@ fi
 npm ci
 npm run build
 docker build -t job-console-control:local -f apps/control/Dockerfile .
+npm --prefix apps/headlamp-plugin ci
+npm --prefix apps/headlamp-plugin run check
+npm run plugin
 docker build -t job-console-headlamp:local apps/headlamp-plugin
 k create namespace job-console --dry-run=client -o yaml | k apply -f -
 k label namespace job-console app.kubernetes.io/managed-by=job-console --overwrite

@@ -13,9 +13,9 @@ test('E2E-01/02: Headlamp navigation, defaults, validation and typed GRETL param
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Jobs', exact: true })).toBeVisible();
   for (const name of ['Jobs', 'Ausführungen', 'Zeitpläne']) {
-    await expect(page.getByRole('link', { name, exact: true })).toBeVisible();
+    await expect(page.getByRole('navigation', { name: 'Navigation' }).getByRole('button', { name, exact: true })).toBeVisible();
   }
-  await expect(page.getByRole('link', { name: 'Workloads' })).toHaveCount(0);
+  await expect(page.getByRole('navigation', { name: 'Navigation' }).getByRole('button', { name: 'Workloads' })).toHaveCount(0);
   await page.getByRole('link', { name: 'Hello GRETL starten' }).click();
   await page.reload();
   await expect(page.getByLabel('Wiederholungen')).toHaveValue('1');
