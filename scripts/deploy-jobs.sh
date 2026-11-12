@@ -2,19 +2,24 @@
 set -euo pipefail
 source "$(dirname "$0")/local.sh"
 [[ $(namespace_owner) == job-console/job-console ]]
-npm run build
-npm run generate -- --jobs-dir "${JOBS_DIR:-../gretl-runtime-jobs}"
-generated=(-f build/generated/cronworkflows.yaml -f build/generated/catalog-configmap.yaml)
-k apply --dry-run=server "${generated[@]}"
-# Stop the retired MVP schedules, scoped to Console-managed resources.
-k delete cronjobs.batch -l app.kubernetes.io/managed-by=job-console --cascade=orphan
-k apply "${generated[@]}"
-while IFS= read -r name; do
-  if [[ -n $name ]] && ! jq -e --arg id "$name" 'any(.[]; .id == $id and has("schedule"))' build/generated/catalog.json >/dev/null; then
-    k delete cronworkflows.argoproj.io "$name" --cascade=orphan
-  fi
-done < <(k get cronworkflows.argoproj.io -l app.kubernetes.io/managed-by=job-console -o json | jq -r '.items[].metadata.name')
-if k get deployment launcher >/dev/null 2>&1; then
-  k rollout restart deployment/launcher
-  k rollout status deployment/launcher --timeout=180s
-fi
+name=$(k create -o jsonpath='{.metadata.name}' -f - <<'YAML'
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: job-console-sync-
+  labels: {job-console.io/sync: "true"}
+spec:
+  workflowTemplateRef: {name: job-console-sync}
+YAML
+)
+echo "Workflow $name"
+for ((i=0; i<120; i++)); do
+  phase=$(k get workflow "$name" -o jsonpath='{.status.phase}')
+  case $phase in
+    Succeeded) break ;;
+    Failed|Error) k logs -l "workflows.argoproj.io/workflow=$name" -c main --tail=50 || true; exit 1 ;;
+  esac
+  sleep 2
+done
+[[ $phase == Succeeded ]]
+k logs -l "workflows.argoproj.io/workflow=$name" -c main --tail=20

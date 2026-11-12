@@ -1,13 +1,14 @@
 import { randomBytes } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
 import { extname } from 'node:path';
 import Fastify, { type FastifyRequest } from 'fastify';
 import multipart from '@fastify/multipart';
 import { CoreV1Api, CustomObjectsApi, KubeConfig, V1Pod } from '@kubernetes/client-node';
 import { validateValues } from './catalog.js';
-import { argoClient, type Workflow } from './argo.js';
+import { argoClient, type Artifact, type Workflow } from './argo.js';
 import { jobIdLabel, managedBy, workflow, parametersAnnotation, revisionAnnotation, imageAnnotation,
-  outputLabelsAnnotation, selector, type CatalogJob } from './workflows.js';
+  outputLabelsAnnotation, selector, templateName, type CatalogJob } from './workflows.js';
+import { sync } from './sync.js';
+import { type Values } from './catalog.js';
 import { fileLimit, storage, totalLimit } from './storage.js';
 
 class HttpError extends Error {
@@ -21,8 +22,9 @@ const kubeCode = (error: unknown) => (error as { code?: number }).code;
 export function runState(run: Workflow, candidates: V1Pod[] = []) {
   const phase = run.status?.phase;
   const terminal = ['Succeeded', 'Failed', 'Error'].includes(phase ?? '');
+  if (phase === 'Succeeded') return { status: 'Succeeded' };
   if (run.spec.shutdown === 'Terminate') return { status: terminal ? 'Canceled' : 'Canceling', reason: run.status?.message };
-  if (terminal) return { status: phase === 'Succeeded' ? 'Succeeded' : 'Failed', reason: run.status?.message };
+  if (terminal) return { status: 'Failed', reason: run.status?.message };
   const nodes = Object.values(run.status?.nodes ?? {});
   if (nodes.some(node => node.type === 'Suspend' && node.phase === 'Running')) return { status: 'AwaitingInput' };
   if (nodes.some(node => node.synchronizationStatus?.waiting) || run.status?.synchronization?.mutex?.waiting?.length) {
@@ -49,7 +51,7 @@ function summary(run: Workflow, candidates: V1Pod[] = []) {
   };
 }
 
-export async function buildApp(catalog: CatalogJob[], argo: ReturnType<typeof argoClient>, core: CoreV1Api,
+export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<CatalogJob[]>), argo: ReturnType<typeof argoClient>, core: CoreV1Api,
   custom: CustomObjectsApi, namespace: string,
   s3: Pick<ReturnType<typeof storage>, 'upload' | 'remove' | 'download' | 'stat'> = storage(),
   limits = { file: fileLimit, total: totalLimit }) {
@@ -71,8 +73,9 @@ export async function buildApp(catalog: CatalogJob[], argo: ReturnType<typeof ar
     return reply.code(502).send({ error: 'Kubernetes or object storage operation failed' });
   });
   let uploading = false;
-  const findJob = (id: string) => {
-    const job = catalog.find(item => item.id === id && item.exposed);
+  const catalog = () => typeof catalogSource === 'function' ? catalogSource() : Promise.resolve(catalogSource);
+  const findJob = async (id: string) => {
+    const job = (await catalog()).find(item => item.id === id && item.exposed);
     if (!job) throw missing();
     return job;
   };
@@ -89,18 +92,91 @@ export async function buildApp(catalog: CatalogJob[], argo: ReturnType<typeof ar
   const podsFor = (run: Workflow, candidates: V1Pod[]) =>
     candidates.filter(p => p.metadata?.ownerReferences?.some(ref => ref.controller && ref.uid === run.metadata.uid));
 
+  async function loadTemplate(job: CatalogJob) {
+    if (typeof catalogSource !== 'function') return undefined;
+    const template = await custom.getNamespacedCustomObject({
+      group: 'argoproj.io', version: 'v1alpha1', plural: 'workflowtemplates', namespace, name: templateName(job),
+    }).catch(error => {
+      if (kubeCode(error) === 404) throw conflict('The job definition changed. Reload it before starting.');
+      throw error;
+    }) as { metadata: Workflow['metadata']; spec: Workflow['spec'] };
+    if (template.metadata.labels?.[managedBy] !== 'job-console' ||
+        template.metadata.annotations?.[revisionAnnotation] !== job.source.revision ||
+        template.metadata.annotations?.[imageAnnotation] !== job.source.image) {
+      throw conflict('Workflow template changed');
+    }
+    return template.spec;
+  }
+  function createRun(job: CatalogJob, name: string, values: Values, files: string[], template?: Workflow['spec'], inputRun?: string) {
+    const run = workflow(job, name, values, files, inputRun ?? name);
+    if (!template) return argo.create(run);
+    type Task = { inputs: { artifacts: unknown[] } };
+    const expected = (run.spec.templates as Task[])[0];
+    const task = (template.templates as Task[])[0];
+    task.inputs.artifacts = [task.inputs.artifacts[0], ...expected.inputs.artifacts.slice(1)];
+    return argo.create({ ...run, spec: template });
+  }
+
+  const syncLabel = 'job-console.io/sync';
+  const syncRef = process.env.JOBS_REF ?? 'main';
+  const previewEnabled = process.env.ALLOW_PREVIEW === 'true';
+  const syncInfo = (run: Workflow) => ({
+    ...summary(run),
+    ref: (run.spec.arguments as { parameters?: { name: string; value?: string }[] } | undefined)
+      ?.parameters?.find(parameter => parameter.name === 'ref')?.value || syncRef,
+  });
+  app.get('/api/synchronizations', async () => {
+    const [jobs, result] = await Promise.all([catalog(), argo.list(syncLabel + '=true')]);
+    return {
+      repository: process.env.JOBS_REPOSITORY,
+      defaultRef: syncRef,
+      previewEnabled,
+      active: jobs[0]?.source,
+      runs: (result.items ?? []).filter(run => run.metadata.labels?.[syncLabel] === 'true').map(syncInfo)
+        .sort((a, b) => new Date(b.created ?? 0).getTime() - new Date(a.created ?? 0).getTime()),
+    };
+  });
+  app.get<{ Params: { name: string } }>('/api/synchronizations/:name', async ({ params }) => {
+    if (!/^job-console-sync-[a-z0-9-]+$/.test(params.name)) throw missing();
+    const run = await argo.get(params.name).catch(error => { if (kubeCode(error) === 404) throw missing(); throw error; });
+    if (run.metadata.labels?.[syncLabel] !== 'true') throw missing();
+    const pods = podsFor(run, (await core.listNamespacedPod({
+      namespace, labelSelector: 'workflows.argoproj.io/workflow=' + params.name,
+    })).items);
+    const pod = pods[0]?.metadata?.name;
+    const logs = pod && await core.readNamespacedPodLog({ namespace, name: pod, container: 'main', tailLines: 60, limitBytes: 16384 })
+      .catch(error => { if ([400, 404].includes(kubeCode(error) ?? 0)) return ''; throw error; });
+    return { ...syncInfo(run), logs };
+  });
+  app.post('/api/synchronizations', async (request, reply) => {
+    const body = request.body ?? {};
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some(key => key !== 'ref')) {
+      throw bad('Expected an optional Git branch');
+    }
+    const ref = (body as { ref?: unknown }).ref ?? syncRef;
+    if (typeof ref !== 'string' || !/^[-a-zA-Z0-9._/]{1,150}$/.test(ref) || ref.startsWith('-') ||
+        ref.includes('..') || (ref !== syncRef && !previewEnabled)) throw bad('Git branch is not allowed');
+    const run = await argo.create({
+      apiVersion: 'argoproj.io/v1alpha1', kind: 'Workflow',
+      metadata: { generateName: 'job-console-sync-', labels: { [syncLabel]: 'true' } },
+      spec: { workflowTemplateRef: { name: 'job-console-sync' }, arguments: { parameters: [{ name: 'ref', value: ref }] } },
+    });
+    return reply.code(201).send(syncInfo(run));
+  });
+
   app.get('/healthz', async () => ({ status: 'ok' }));
-  app.get('/api/jobs', async () => catalog.filter(job => job.exposed).map(({ id, name, description, runtime, schedule, resolvedCron }) =>
-    ({ id, name, description, runtime, scheduled: Boolean(schedule), schedule, resolvedCron })));
+  app.get('/api/jobs', async () => (await catalog()).filter(job => job.exposed).map(
+    ({ id, name, description, runtime, source, parameters, schedule, resolvedCron }) =>
+      ({ id, name, description, runtime, kind: 'job', source, parameters, scheduled: Boolean(schedule), schedule, resolvedCron })));
   app.get<{ Params: { id: string } }>('/api/jobs/:id', async ({ params }) => {
-    const { script: _script, resources: _resources, ...details } = findJob(params.id);
+    const { script: _script, resources: _resources, ...details } = await findJob(params.id);
     return details;
   });
   app.get('/api/schedules', async () => {
     const schedules = await custom.listNamespacedCustomObject({
       group: 'argoproj.io', version: 'v1alpha1', plural: 'cronworkflows', namespace, labelSelector: selector,
     }) as { items: { metadata: { name: string }; spec?: { suspend?: boolean }; status?: { lastScheduledTime?: string } }[] };
-    return catalog.filter(job => job.schedule).map(job => {
+    return (await catalog()).filter(job => job.schedule).map(job => {
       const cron = schedules.items.find(item => item.metadata?.name === job.id);
       return { id: job.id, name: job.name, ...job.schedule, resolvedCron: job.resolvedCron,
         active: cron ? !cron.spec?.suspend : null, lastSchedule: cron?.status?.lastScheduledTime };
@@ -108,7 +184,12 @@ export async function buildApp(catalog: CatalogJob[], argo: ReturnType<typeof ar
   });
 
   app.post<{ Params: { id: string } }>('/api/jobs/:id/runs', async (request, reply) => {
-    const job = findJob(request.params.id);
+    const job = await findJob(request.params.id);
+    const displayedRevision = request.headers['x-job-revision'];
+    if (displayedRevision !== undefined && displayedRevision !== job.source.revision) {
+      throw conflict('The job definition changed. Reload it before starting.');
+    }
+    const template = await loadTemplate(job);
     const hasUpload = request.isMultipart();
     if (hasUpload && uploading) throw new HttpError(429, 'Another upload is in progress');
     const name = `${job.id}-${randomBytes(6).toString('hex')}`;
@@ -168,7 +249,7 @@ export async function buildApp(catalog: CatalogJob[], argo: ReturnType<typeof ar
       catch (error) { throw bad((error as Error).message); }
       if (controller.signal.aborted) throw bad('Upload interrupted');
       creating = true;
-      const created = await argo.create(workflow(job, name, values, [...files]));
+      const created = await createRun(job, name, values, [...files], template);
       return reply.code(201).send(summary(created));
     } catch (error) {
       // A transport failure during creation can mean the Job already exists.
@@ -253,37 +334,58 @@ export async function buildApp(catalog: CatalogJob[], argo: ReturnType<typeof ar
     if (finished(run)) throw conflict('Run has already finished');
     return summary(await argo.terminate(request.params.name));
   });
-  app.post('/api/runs/:name/repeat', async (request: RunRequest, reply) => {
+  app.post('/api/runs/:name/rerun', async (request: RunRequest, reply) => {
     const run = await findRun(request.params.name);
     if (!finished(run)) throw conflict('Run is still active');
-    const job = findJob(run.metadata.labels![jobIdLabel]);
-    if (job.parameters.some(parameter => parameter.type === 'file')) throw bad('Select the input files again');
+    const job = await findJob(run.metadata.labels![jobIdLabel]);
+    const templates = run.spec.templates as { inputs?: { artifacts?: Artifact[] } }[];
+    const inputs = templates[0]?.inputs?.artifacts ?? [];
+    const files = [];
+    let inputRun: string | undefined;
+    for (const field of job.parameters.filter(parameter => parameter.type === 'file')) {
+      const artifact = inputs.find(item => item.name === 'upload-' + field.name);
+      if (!artifact) continue;
+      const key = artifact.s3?.key;
+      const match = key && /^runs\/([a-z0-9][a-z0-9-]{0,62})\/inputs\/([a-zA-Z0-9_]+)$/.exec(key);
+      if (!match || match[2] !== field.name || (inputRun && inputRun !== match[1]) ||
+          run.metadata.annotations?.[revisionAnnotation] !== job.source.revision || !(await s3.stat(key!)).available) {
+        throw conflict('Select the input files again');
+      }
+      inputRun = match[1];
+      files.push(field.name);
+    }
     let values;
-    try { values = validateValues(job, summary(run).parameters); }
+    try { values = validateValues(job, summary(run).parameters, new Set(files)); }
     catch (error) { throw bad((error as Error).message); }
     const name = `${job.id}-${randomBytes(6).toString('hex')}`;
-    return reply.code(201).send(summary(await argo.create(workflow(job, name, values, []))));
+    return reply.code(201).send(summary(await createRun(job, name, values, files, await loadTemplate(job), inputRun)));
   });
   app.delete('/api/runs/:name', async (request: RunRequest, reply) => {
-    if (!finished(await findRun(request.params.name))) throw conflict('Run is still active');
-    await argo.remove(request.params.name);
+    const run = await findRun(request.params.name);
+    if (!finished(run)) throw conflict('Run is still active');
+    await argo.remove(request.params.name, run.metadata.uid);
     return reply.code(204).send();
   });
   return app;
 }
 
 async function main() {
-  const [mode] = process.argv.slice(2);
+  const [mode, ref] = process.argv.slice(2);
+  if (mode === 'sync') return sync(ref || process.env.JOBS_REF || 'main');
   if (mode === 'init-storage') return storage().initialize();
   if (mode) throw new Error('Unknown command');
   if (process.env.LOCAL_UNAUTHENTICATED !== 'true') throw new Error('Local mode must be enabled explicitly');
   const config = new KubeConfig();
   config.loadFromCluster();
   const namespace = process.env.NAMESPACE ?? 'job-console';
-  const catalog = JSON.parse(await readFile('/catalog/catalog.json', 'utf8')) as CatalogJob[];
+  const core = config.makeApiClient(CoreV1Api);
+  const catalog = async () => {
+    const resource = await core.readNamespacedConfigMap({ namespace, name: 'job-console-catalog' });
+    return JSON.parse(resource.data?.['catalog.json'] ?? '[]') as CatalogJob[];
+  };
   const endpoint = process.env.ARGO_ENDPOINT;
   if (!endpoint) throw new Error('ARGO_ENDPOINT is required');
-  const app = await buildApp(catalog, argoClient(endpoint, namespace), config.makeApiClient(CoreV1Api),
+  const app = await buildApp(catalog, argoClient(endpoint, namespace), core,
     config.makeApiClient(CustomObjectsApi), namespace);
   await app.listen({ host: '0.0.0.0', port: 8080 });
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => void app.close());

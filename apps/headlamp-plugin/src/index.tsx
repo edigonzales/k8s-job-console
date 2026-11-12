@@ -172,7 +172,7 @@ function JobForm({ job }: { job: JobDetail }) {
     const attempt = new AbortController();
     controller.current = attempt;
     try {
-      const run = await launch(job.id, typed, uploads.map(([, file]) => file), uploads.map(([field]) => field), setProgress, attempt.signal);
+      const run = await launch(job.id, job.source?.revision ?? '', typed, uploads.map(([, file]) => file), uploads.map(([field]) => field), setProgress, attempt.signal);
       history.push(runLink(run.name));
     } catch (cause) {
       setError((cause as Error).message);
@@ -184,6 +184,9 @@ function JobForm({ job }: { job: JobDetail }) {
 
   return <Stack component="form" onSubmit={submit} noValidate spacing={2} sx={{ maxWidth: 580 }}>
     <Typography>{job.description}</Typography>
+    {job.source?.revision && <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
+      Git {job.source.ref && job.source.ref + ' · '}{job.source.revision}
+    </Typography>}
     {job.schedule && <Typography color="text.secondary">{job.schedule.cron} · {job.schedule.timeZone}</Typography>}
     {error && <Alert severity="error">{error}</Alert>}
     <Box component="fieldset" disabled={busy} sx={{ border: 0, m: 0, p: 0, minWidth: 0 }}>
@@ -266,7 +269,7 @@ function RunDetails() {
         await api(path + '/cancel', { method: 'POST' });
         run.refresh();
       } else if (action === 'repeat') {
-        const repeated = await api<Run>(path + '/repeat', { method: 'POST' });
+        const repeated = await api<Run>(path + '/rerun', { method: 'POST' });
         history.push(runLink(repeated.name));
       } else {
         await api(path, { method: 'DELETE' });
@@ -292,9 +295,9 @@ function RunDetails() {
       {active(data)
         ? <Button variant="outlined" color="warning" disabled={busy || data.status === 'Canceling'} onClick={() => updateRun('cancel')}>Abbrechen</Button>
         : <>
-          {job.data?.parameters.some(parameter => parameter.type === 'file')
-            ? <Button component={Link} to={jobLink(data.jobId)} variant="outlined">Mit neuer Datei starten</Button>
-            : <Button variant="outlined" disabled={busy} onClick={() => updateRun('repeat')}>Wiederholen</Button>}
+          <Button variant="outlined" disabled={busy} onClick={() => updateRun('repeat')}>Wiederholen</Button>
+          {job.data?.parameters.some(parameter => parameter.type === 'file') &&
+            <Button component={Link} to={jobLink(data.jobId)} variant="outlined">Mit neuer Datei starten</Button>}
           <Button variant="outlined" color="error" disabled={busy} onClick={() => updateRun('delete')}>Löschen</Button>
         </>}
     </Stack>
@@ -332,10 +335,63 @@ function Schedules() {
       date(item.lastSchedule)] }))} />}</Load></Page>;
 }
 
+interface SyncStatus {
+  repository?: string;
+  defaultRef: string;
+  previewEnabled: boolean;
+  active?: { ref?: string; revision: string };
+  runs: (Run & { ref: string })[];
+}
+
+function Synchronizations() {
+  const state = useApi<SyncStatus>('/synchronizations', 4000);
+  const [ref, setRef] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [selected, setSelected] = useState('');
+  const details = useApi<{ logs?: string }>(selected ? '/synchronizations/' + selected : '/healthz', selected ? 4000 : undefined);
+  async function start(branch?: string) {
+    setError('');
+    setBusy(true);
+    try {
+      const run = await api<Run>('/synchronizations', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(branch ? { ref: branch } : {}) });
+      setSelected(run.name);
+      state.refresh();
+    } catch (cause) { setError((cause as Error).message); }
+    finally { setBusy(false); }
+  }
+  return <Page title="Bereitstellung"><Load state={state}>{data => <>
+    <Typography>{data.repository}</Typography>
+    {data.active && <Typography sx={{ overflowWrap: 'anywhere' }}>
+      {data.active.ref} · {data.active.revision}
+      {data.active.ref !== data.defaultRef && ' · Vorschau'}
+    </Typography>}
+    <Typography>Letzter erfolgreicher Sync {date(data.runs.find(run => run.status === 'Succeeded')?.finished)}</Typography>
+    {error && <Alert severity="error">{error}</Alert>}
+    <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1}>
+      <Button variant="contained" disabled={busy} onClick={() => start()}>Jetzt synchronisieren</Button>
+      {data.previewEnabled && <>
+        <TextField size="small" label="Vorschau-Branch" value={ref} onChange={event => setRef(event.target.value)} />
+        <Button variant="outlined" disabled={busy || !ref.trim()} onClick={() => start(ref.trim())}>Vorschau laden</Button>
+      </>}
+    </Stack>
+    <Rows headers={['Versuch', 'Branch', 'Status', 'Details']} empty="Keine Synchronisationen."
+      rows={data.runs.map(run => ({ key: run.name, cells: [
+        date(run.started ?? run.created), run.ref, <Status status={run.status} />,
+        <Button onClick={() => setSelected(run.name)}>Protokoll</Button>,
+      ] }))} />
+    {selected && <Load state={details}>{result => result.logs &&
+      <Paper component="pre" sx={{ p: 2, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{result.logs}</Paper>
+    }</Load>}
+  </>}</Load></Page>;
+}
+
 const sidebar = 'HOME';
 const pages = [
   { name: 'jobs', label: 'Jobs', path: root, icon: 'mdi:format-list-bulleted', component: Jobs },
   { name: 'runs', label: 'Ausführungen', path: root + '/runs', icon: 'mdi:play-circle-outline', component: Runs },
+  { name: 'deployment', label: 'Bereitstellung', path: root + '/deployment', icon: 'mdi:source-branch-sync', component: Synchronizations },
   { name: 'schedules', label: 'Zeitpläne', path: root + '/schedules', icon: 'mdi:calendar-clock', component: Schedules },
 ];
 for (const page of pages) {

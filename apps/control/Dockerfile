@@ -6,6 +6,8 @@ COPY apps/control/src ./apps/control/src
 RUN npm run build && npm prune --omit=dev
 
 FROM node:22-bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app/build/control ./build/control
 COPY --from=build /app/node_modules ./node_modules

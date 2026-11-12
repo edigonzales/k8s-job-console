@@ -1,10 +1,9 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, readdir, readFile, lstat, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
-import { parse, stringify } from 'yaml';
-import { parseJob, validateValues } from './catalog.js';
-import { cronWorkflow, type CatalogJob } from './workflows.js';
+import { stringify } from 'yaml';
+import { generateResources, validateGitTree } from './generator.js';
 
 const { values } = parseArgs({ options: {
   'jobs-dir': { type: 'string', default: '../gretl-runtime-jobs' },
@@ -19,42 +18,18 @@ if (!/^[a-f0-9]{40}$/.test(revision)) throw new Error('Expected a full Git commi
 if (git('status', '--porcelain', '--untracked-files=all', '--', 'jobs', 'flows')) {
   throw new Error('Commit all job definitions and code before generating workflows');
 }
-if (/^(120000|160000) /m.test(git('ls-tree', '-r', 'HEAD'))) {
-  throw new Error('Git symlinks and submodules are unsupported');
-}
+await validateGitTree(jobsDir, git);
 const repository = new URL(values.repository ?? git('remote', 'get-url', 'origin'));
 if (!['https:', 'http:'].includes(repository.protocol) || repository.username || repository.password ||
     repository.search || repository.hash) throw new Error('Expected a Git HTTP(S) URL without credentials');
 const image = values.image ?? process.env.GRETL_IMAGE;
-if (!image || !/(?::[a-zA-Z0-9_.-]+|@sha256:[a-f0-9]{64})$/.test(image) || image.endsWith(':latest')) {
-  throw new Error('Set GRETL_IMAGE or --image to a versioned runtime image');
-}
-
-const root = join(jobsDir, 'jobs');
-const jobs: CatalogJob[] = [];
-for (const entry of (await readdir(root, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name, 'en'))) {
-  if (!entry.isDirectory()) throw new Error(`Expected a job directory: ${entry.name}`);
-  const directory = join(root, entry.name);
-  const file = join(directory, 'job.yaml');
-  try {
-    if (!(await lstat(file)).isFile()) throw new Error('Expected a regular definition');
-    const job = parseJob(parse(await readFile(file, 'utf8')));
-    if (job.id !== entry.name) throw new Error('Job ID must match directory name');
-    const stat = await lstat(join(directory, job.script));
-    if (!stat.isFile() || stat.size === 0) throw new Error(`Invalid script: ${job.script}`);
-    if (job.schedule) validateValues(job, {});
-    jobs.push({ ...job, source: { repository: repository.href, revision, image } });
-  } catch (error) {
-    throw new Error(`${file}: ${(error as Error).message}`);
-  }
-}
-const catalog = JSON.stringify(jobs, null, 2) + '\n';
-if (Buffer.byteLength(catalog) > 900 * 1024) throw new Error('Catalog exceeds ConfigMap budget');
+if (!image) throw new Error('Set GRETL_IMAGE or --image');
+const generated = await generateResources(jobsDir, { repository: repository.href, revision, image });
+const list = (items: unknown[]) => stringify({ apiVersion: 'v1', kind: 'List', items });
 await mkdir(values.output!, { recursive: true });
 for (const [file, content] of Object.entries({
-  'catalog.json': catalog,
-  'catalog-configmap.yaml': stringify({
-    apiVersion: 'v1', kind: 'ConfigMap', metadata: { name: 'job-console-catalog' }, data: { 'catalog.json': catalog },
-  }),
-  'cronworkflows.yaml': stringify({ apiVersion: 'v1', kind: 'List', items: jobs.filter(job => job.schedule).map(cronWorkflow) }),
+  'catalog.json': generated.configMap.data['catalog.json'],
+  'catalog-configmap.yaml': stringify(generated.configMap),
+  'workflowtemplates.yaml': list(generated.templates),
+  'cronworkflows.yaml': list(generated.crons),
 })) await writeFile(join(values.output!, file), content);

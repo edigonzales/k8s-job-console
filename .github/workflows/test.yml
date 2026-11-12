@@ -48,7 +48,7 @@ jobs:
           docker run --rm -v "$PWD:/work:ro" ghcr.io/yannh/kubeconform:v0.7.0 \
             -strict -kubernetes-version 1.35.0 -schema-location default \
             -schema-location '/work/build/argo-schemas/{{.ResourceKind}}.json' \
-            /work/deploy /work/build/generated/cronworkflows.yaml /work/build/generated/catalog-configmap.yaml \
+            /work/deploy /work/build/generated/cronworkflows.yaml /work/build/generated/workflowtemplates.yaml /work/build/generated/catalog-configmap.yaml \
             /work/scripts/argo-smoke.yaml /work/test/e2e/fixtures/wait-workflow.yaml
       - name: Build images
         working-directory: k8s-job-console

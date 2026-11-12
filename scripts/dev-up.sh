@@ -40,7 +40,16 @@ if ! k wait --for=condition=complete "$init" --timeout=100s; then
   exit 1
 fi
 ./scripts/install-argo.sh
+k create configmap job-console-sync --dry-run=client -o yaml \
+  --from-literal=JOBS_REPOSITORY="${JOBS_REPOSITORY:-https://github.com/edigonzales/gretl-runtime-jobs.git}" \
+  --from-literal=JOBS_REF="${JOBS_REF:-feature/v2-job-console}" \
+  --from-literal=GRETL_IMAGE="$GRETL_IMAGE" --from-literal=ALLOW_PREVIEW=true | k apply -f -
+if k get configmap job-console-catalog >/dev/null 2>&1; then
+  k label configmap job-console-catalog app.kubernetes.io/managed-by=job-console
+fi
+k apply -f deploy/seeder.yaml
 ./scripts/deploy-jobs.sh
+k delete cronjobs.batch -l app.kubernetes.io/managed-by=job-console --cascade=orphan
 k apply -f deploy/launcher.yaml -f deploy/headlamp.yaml
 k rollout restart deployment/launcher deployment/headlamp
 k rollout status deployment/launcher --timeout=180s

@@ -103,7 +103,7 @@ test('generator writes deterministic manifests and rejects symlink scripts', asy
       ['build/control/generate.js', '--jobs-dir', dir, '--output', join(dir, name), '--repository', source.repository, '--image', source.image]);
     generate('one');
     generate('two');
-    for (const file of ['catalog.json', 'catalog-configmap.yaml', 'cronworkflows.yaml']) {
+    for (const file of ['catalog.json', 'catalog-configmap.yaml', 'workflowtemplates.yaml', 'cronworkflows.yaml']) {
       assert.deepEqual(await readFile(join(dir, 'one', file)), await readFile(join(dir, 'two', file)));
     }
     await rm(join(dir, 'jobs/hello/job.groovy'));

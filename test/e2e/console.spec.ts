@@ -152,3 +152,13 @@ test('cross-origin browser requests are denied in local mode', async ({ page, re
   expect(response.status()).toBe(403);
   expect(response.headers()['access-control-allow-origin']).toBeUndefined();
 });
+
+
+test('configured Git source and manual synchronization are visible in Headlamp', async ({ page }) => {
+  await page.goto(pageRoot + '/deployment');
+  await expect(page.getByRole('heading', { name: 'Bereitstellung' })).toBeVisible();
+  await expect(page.getByText(/github\.com.*gretl-runtime-jobs/)).toBeVisible();
+  await expect(page.getByText(/feature\/v2-job-console · [a-f0-9]{40}/)).toBeVisible();
+  await page.getByRole('button', { name: 'Jetzt synchronisieren' }).click();
+  await expect(page.getByText(/Synchronized feature\/v2-job-console at [a-f0-9]{40}/)).toBeVisible({ timeout: 60_000 });
+});

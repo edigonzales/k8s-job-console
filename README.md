@@ -9,9 +9,8 @@ und speichert deklarierte Ergebnisdateien in RustFS.
 ## Lokal starten
 
 Vorausgesetzt sind macOS, Rancher Desktop mit Moby und aktiviertem Kubernetes,
-Node.js 22, Java 25, Git, OpenSSL, Python 3, jq und rg. Die Repositories
-`gretl-runtime` und `gretl-runtime-jobs` liegen neben diesem Checkout.
-`GRETL_DIR` und `JOBS_DIR` können auf andere Checkouts zeigen.
+Node.js 22, Java 25, Git, OpenSSL, Python 3, jq und rg. Der Runtime-Checkout liegt standardmässig neben der Console.
+`GRETL_DIR` kann auf einen anderen Checkout zeigen.
 
 ```sh
 kubectl config use-context rancher-desktop
@@ -45,20 +44,31 @@ entfernt den Datenträger ausdrücklich.
 
 ## Jobs bereitstellen
 
+Der Seeder holt alle fünf Minuten den konfigurierten Jobs-Branch aus Git.
+**Jetzt synchronisieren** in Headlamp und `./scripts/deploy-jobs.sh` starten
+denselben Argo-Workflow. Die lokale Entwicklung verwendet den expliziten
+V2-Branch `feature/v2-job-console`, solange dieser separat abgenommen
+wird. `JOBS_REPOSITORY` und `JOBS_REF` lassen sich beim lokalen Start
+setzen. Für ein privates Repository kann das Secret `job-console-git`
+mit den schreibgeschützten Feldern `username` und `password` hinterlegt
+werden.
+
+Der Generator bleibt lokal aufrufbar.
+
 ```sh
 npm ci
 npm run build
-export GRETL_IMAGE=job-console-gretl:BUILD_ID
-npm run generate -- --jobs-dir ../gretl-runtime-jobs --output build/generated
-./scripts/deploy-jobs.sh
+npm run generate -- --jobs-dir ../gretl-runtime-jobs --image job-console-gretl:BUILD_ID
 ```
 
-Der Generator verwendet den aktuellen Jobs-Commit. Der Commit muss beim
-konfigurierten Git-Remote abrufbar sein. Das Deployment validiert Katalog und
-CronWorkflows am Kubernetes-API-Server. Der Generator unterstützt fünf
-Cron-Felder, Monats- und Wochentagskürzel sowie `H`, `H(min-max)` und
-`H/step` in Minuten und Stunden. Argo verwendet die angegebene Zeitzone.
-Bei Zeitumstellungen können lokale Uhrzeiten ausfallen oder wiederholt auftreten.
+Der Seeder prüft die Definitionen und erstellt unveränderliche
+WorkflowTemplates, bevor er den aktiven Katalog aktualisiert.
+Fehlerhafte Definitionen lassen den letzten Katalog aktiv.
+Vorschau-Branches sind auf die Entwicklungsumgebung begrenzt. Der
+Seeder aktiviert deren Zeitpläne nicht. Der Generator unterstützt
+`H`, `H(min-max)` und `H/step` in Minuten und Stunden. Argo verwendet
+die angegebene Zeitzone. Bei Zeitumstellungen können lokale Uhrzeiten
+ausfallen oder wiederholt auftreten.
 
 Eine Definition unterstützt bis zu 32 Parameter mit zusammen höchstens
 128 KiB serialisierten Werten. Der Launcher verarbeitet jeweils einen

@@ -21,6 +21,13 @@ rules:
   - apiGroups: [argoproj.io]
     resources: [cronworkflows]
     verbs: [list]
+  - apiGroups: [argoproj.io]
+    resources: [workflowtemplates]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [job-console-catalog]
+    verbs: [get]
   - apiGroups: [""]
     resources: [pods]
     verbs: [list]
@@ -41,6 +48,8 @@ kind: Deployment
 metadata:
   name: launcher
 spec:
+  replicas: 1
+  strategy: {type: Recreate}
   selector:
     matchLabels: {app: launcher}
   template:
@@ -69,6 +78,7 @@ spec:
             - name: NAMESPACE
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
           envFrom:
+            - configMapRef: {name: job-console-sync}
             - configMapRef: {name: job-console-storage}
             - secretRef: {name: job-console-storage}
           resources:
@@ -78,11 +88,8 @@ spec:
             httpGet: {path: /healthz, port: 8080}
             periodSeconds: 2
           volumeMounts:
-            - {name: catalog, mountPath: /catalog, readOnly: true}
             - {name: argo-ca, mountPath: /argo-ca, readOnly: true}
       volumes:
-        - name: catalog
-          configMap: {name: job-console-catalog}
         - name: argo-ca
           secret:
             secretName: job-console-argo-tls

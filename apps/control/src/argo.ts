@@ -66,7 +66,8 @@ export function argoClient(endpoint: string, namespace: string) {
     list: (selector: string) => request<{ items?: Workflow[] }>(
       path('workflows') + '?' + new URLSearchParams({ 'listOptions.labelSelector': selector })),
     terminate: (name: string) => request<Workflow>(path('workflows', name) + '/terminate', 'PUT', { namespace, name }),
-    remove: (name: string) => request<unknown>(path('workflows', name), 'DELETE'),
+    remove: (name: string, uid?: string) => request<unknown>(path('workflows', name) + (uid
+      ? '?' + new URLSearchParams({ 'deleteOptions.preconditions.uid': uid }) : ''), 'DELETE'),
     set: (name: string, node: string, phase: 'Succeeded' | 'Failed', outputs: Record<string, string>) =>
       request<Workflow>(path('workflows', name) + '/set', 'PUT', {
         namespace, name, phase, nodeFieldSelector: 'id=' + node, outputParameters: JSON.stringify(outputs),

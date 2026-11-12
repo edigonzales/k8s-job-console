@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: job-console-seeder
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: job-console-seeder
+rules:
+  - apiGroups: [argoproj.io]
+    resources: [workflowtemplates]
+    verbs: [get, list, create, delete]
+  - apiGroups: [argoproj.io]
+    resources: [workflows]
+    verbs: [list]
+  - apiGroups: [argoproj.io]
+    resources: [cronworkflows]
+    verbs: [get, list, create, update, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [job-console-catalog]
+    verbs: [get, update]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [create]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: job-console-seeder
+subjects: [{kind: ServiceAccount, name: job-console-seeder}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: job-console-seeder}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: job-console-sync
+spec:
+  workflowMetadata:
+    labels: {job-console.io/sync: "true"}
+  serviceAccountName: job-console-seeder
+  executor: {serviceAccountName: job-console-executor}
+  entrypoint: sync
+  activeDeadlineSeconds: 240
+  ttlStrategy: {secondsAfterCompletion: 604800}
+  synchronization:
+    mutexes: [{name: job-console-sync}]
+  arguments:
+    parameters: [{name: ref, value: ""}]
+  volumes: [{name: tmp, emptyDir: {}}]
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile: {type: RuntimeDefault}
+  templates:
+    - name: sync
+      container:
+        image: job-console-control:local
+        imagePullPolicy: Never
+        command: [node, /app/build/control/launcher.js]
+        args: [sync, "{{workflow.parameters.ref}}"]
+        envFrom: [{configMapRef: {name: job-console-sync}}]
+        env:
+          - name: JOBS_GIT_USERNAME
+            valueFrom: {secretKeyRef: {name: job-console-git, key: username, optional: true}}
+          - name: JOBS_GIT_PASSWORD
+            valueFrom: {secretKeyRef: {name: job-console-git, key: password, optional: true}}
+          - name: NAMESPACE
+            valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        volumeMounts: [{name: tmp, mountPath: /tmp}]
+---
+apiVersion: argoproj.io/v1alpha1
+kind: CronWorkflow
+metadata:
+  name: job-console-sync
+spec:
+  schedules: ["*/5 * * * *"]
+  timezone: UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  workflowSpec:
+    workflowTemplateRef: {name: job-console-sync}

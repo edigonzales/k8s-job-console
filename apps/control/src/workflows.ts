@@ -14,9 +14,17 @@ export interface Source {
   repository: string;
   revision: string;
   image: string;
+  ref?: string;
+  gitSecret?: string;
 }
 
 export type CatalogJob = Job & { source: Source };
+
+export const templateAnnotation = 'job-console.io/template';
+export function templateName(job: CatalogJob) {
+  const imageVersion = job.source.image.split(':').pop()!.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 12);
+  return `${job.id}-${job.source.revision.slice(0, 12)}-${imageVersion}`.replace(/-+$/g, '');
+}
 
 const restricted = {
   allowPrivilegeEscalation: false,
@@ -37,11 +45,11 @@ function parametersFile(job: Job, values: Values, files: string[]) {
     JSON.stringify(name) + ':' + JSON.stringify(String(value)).replaceAll('{', '\\u007b')).join(',') + '}';
 }
 
-export function workflow(job: CatalogJob, name: string | undefined, values: Values, files: string[]): Workflow {
+export function workflow(job: CatalogJob, name: string | undefined, values: Values, files: string[], inputRun = name): Workflow {
   const inputFiles: Artifact[] = files.map(field => ({
     name: `upload-${field}`,
     path: '/inputs/' + field,
-    s3: { key: inputKey(name!, field) },
+    s3: { key: inputKey(inputRun!, field) },
   }));
   return {
     apiVersion: 'argoproj.io/v1alpha1',
@@ -52,6 +60,7 @@ export function workflow(job: CatalogJob, name: string | undefined, values: Valu
       annotations: {
         [revisionAnnotation]: job.source.revision,
         [imageAnnotation]: job.source.image,
+        [templateAnnotation]: templateName(job),
         [parametersAnnotation]: JSON.stringify(values),
         [outputLabelsAnnotation]: JSON.stringify(Object.fromEntries(job.outputs.map(output => [output.name, output.label]))),
       },
@@ -75,6 +84,10 @@ export function workflow(job: CatalogJob, name: string | undefined, values: Valu
         inputs: { artifacts: [
           { name: 'source', path: '/source', git: {
             repo: job.source.repository, revision: job.source.revision, disableSubmodules: true,
+            ...(job.source.gitSecret ? {
+              usernameSecret: { name: job.source.gitSecret, key: 'username' },
+              passwordSecret: { name: job.source.gitSecret, key: 'password' },
+            } : {}),
           } },
           { name: 'parameters', path: '/work/parameters.json', raw: { data: parametersFile(job, values, files) } },
           ...inputFiles,

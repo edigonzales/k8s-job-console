@@ -61,7 +61,7 @@ hello=$(jq -nc --arg message "$literal" '{parameters:{message:$message}}' |
   curl -fsS --json @- "$api/jobs/hello-gretl/runs" | jq -er .name)
 k wait --for=jsonpath='{.status.phase}'=Succeeded "workflow/$hello" --timeout=90s
 curl -fsS "$api/runs/$hello/logs" | jq -e --arg literal "$literal" '.logs | contains($literal)'
-repeat=$(curl -fsS -X POST "$api/runs/$hello/repeat" | jq -er .name)
+repeat=$(curl -fsS -X POST "$api/runs/$hello/rerun" | jq -er .name)
 [[ $repeat != "$hello" ]]
 k wait --for=jsonpath='{.status.phase}'=Succeeded "workflow/$repeat" --timeout=90s
 
