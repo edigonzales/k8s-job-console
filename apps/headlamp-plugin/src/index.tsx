@@ -189,7 +189,10 @@ function JobForm({ job }: { job: JobDetail }) {
       <Stack spacing={2}>{job.parameters.map(p => <Field key={p.name} field={p} value={values[p.name]}
         file={files[p.name]} error={errors[p.name]}
         onValue={value => setValues(previous => ({ ...previous, [p.name]: value }))}
-        onFile={file => setFiles(previous => ({ ...previous, [p.name]: file }))} />)}</Stack>
+        onFile={file => {
+          setFiles(previous => ({ ...previous, [p.name]: file }));
+          setErrors(previous => ({ ...previous, [p.name]: '' }));
+        }} />)}</Stack>
     </Box>
     {busy && <Stack spacing={1}>
       <Typography variant="body2">{uploading ? progress === null ? 'Upload läuft' : `Upload ${Math.floor(progress)} %` : 'Job wird gestartet'}</Typography>
