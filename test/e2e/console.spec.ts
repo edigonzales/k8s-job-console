@@ -37,7 +37,15 @@ test('E2E-03: Browser upload, enum, RustFS object and GRETL CSV analysis', async
   await page.goto(pageRoot + '/jobs/csv-analyzer');
   await page.getByRole('button', { name: 'Job starten' }).click();
   await expect(page.getByText('Wähle eine Datei aus.')).toBeVisible();
-  await page.getByLabel('CSV-Datei').setInputFiles(sample);
+  const input = page.getByLabel('CSV-Datei');
+  const label = page.locator('label').filter({ has: input });
+  await expect(input).toHaveAccessibleDescription('Wähle eine Datei aus.');
+  await expect(label).toHaveAttribute('tabindex', '-1');
+  await input.focus();
+  await expect(label).toHaveCSS('outline-style', 'solid');
+  const chooser = page.waitForEvent('filechooser');
+  await page.keyboard.press('Enter');
+  await (await chooser).setFiles(sample);
   await expect(page.getByText('sample.csv', { exact: false })).toBeVisible();
   await page.getByRole('combobox', { name: 'Trennzeichen' }).click();
   await expect(page.getByRole('option', { name: 'Tabulator' })).toBeVisible();

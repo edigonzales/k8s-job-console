@@ -36,10 +36,10 @@ Passe dazu den Proxy-Pfad an. Im lokalen Modus bleiben Browser-Anfragen
 lokalen Einzelbenutzerbetrieb konfiguriert. Für Mehrbenutzerbetrieb sind Authentisierung, Autorisierung,
 TLS und eine geeignete Secret-Verwaltung erforderlich.
 
-`dev-up.sh` baut bei Bedarf das generische GRETL-Image mit der Buildroutine des
-Runtime-Repositorys. Für einen beabsichtigten Neubau entferne den lokalen Tag
-`job-console-gretl:local` vor dem nächsten Start. Die Deployment- und Generator-
-Vorgaben verwenden `job-console-gretl:local` und `job-console-control:local`.
+`dev-up.sh` baut die GRETL-Distribution und das generische Image bei jedem
+Aufruf aus dem aktuellen Runtime-Checkout. Docker kann passende Build-Schichten
+wiederverwenden. Die Deployment- und Generator-Vorgaben verwenden
+`job-console-gretl:local` und `job-console-control:local`.
 `dev-down.sh` entfernt die
 Anwendung und behält den RustFS-Datenträger. `dev-down.sh --purge-storage`
 entfernt den reservierten Namespace samt Daten.
