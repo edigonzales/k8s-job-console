@@ -30,7 +30,7 @@ test('E2E-01/02: Headlamp navigation, defaults, validation and typed GRETL param
   const logs = await page.locator('pre').textContent();
   expect(logs?.match(/E2E TYPED \$\(HOME\)/g)).toHaveLength(2);
   const run = page.url().split('/').pop()!;
-  expect(kubectl('get', 'job', run, '-o', 'jsonpath={.status.succeeded}')).toBe('1');
+  expect(kubectl('get', 'workflow', run, '-o', 'jsonpath={.status.phase}')).toBe('Succeeded');
 });
 
 test('E2E-03: Browser upload, enum, RustFS object and GRETL CSV analysis', async ({ page }) => {
@@ -74,9 +74,16 @@ test('E2E-03: Browser upload, enum, RustFS object and GRETL CSV analysis', async
     console.log(result.ContentLength);
   `;
   expect(Number(kubectl('exec', 'deploy/launcher', '--', 'node', '--input-type=module', '-e', head, key))).toBeGreaterThan(0);
-  const initStatus = kubectl('get', 'pod', '-l', 'job-name=' + run,
+  const initStatus = kubectl('get', 'pod', '-l', 'workflows.argoproj.io/workflow=' + run,
     '-o', 'jsonpath={.items[0].status.initContainerStatuses[0].state.terminated.exitCode}');
   expect(initStatus).toBe('0');
+  const download = page.waitForEvent('download');
+  await page.getByRole('link', { name: 'Herunterladen' }).click();
+  expect((await download).suggestedFilename()).toBe('report.json');
+  const artifacts = await page.request.get(apiRoot + '/runs/' + run + '/artifacts');
+  const [report] = await artifacts.json();
+  const result = await page.request.get(apiRoot + '/runs/' + run + '/artifacts/' + report.id);
+  expect(await result.json()).toEqual({ records: 3, columns: 2 });
 });
 
 test('E2E-05: failed GRETL run retains its error log', async ({ page }) => {
@@ -89,23 +96,25 @@ test('E2E-05: failed GRETL run retains its error log', async ({ page }) => {
 });
 
 test('E2E-06: cancel in Headlamp terminates the Pod and allows deletion', async ({ page, request }) => {
-  await page.goto(pageRoot + '/jobs/console-test-wait');
-  await page.getByRole('button', { name: 'Job starten' }).click();
-  await expect(page.locator('pre')).toContainText('waiting for cancellation', { timeout: 60_000 });
-  const run = page.url().split('/').pop()!;
-  const pods = () => kubectl('get', 'pod', '-l', 'job-name=' + run, '-o', 'name').trim();
-  expect(pods()).toMatch(/^pod\//);
-  await page.getByRole('button', { name: 'Abbrechen', exact: true }).click();
-  await expect(page.getByText('Canceled', { exact: true })).toBeVisible();
-  expect(kubectl('get', 'job', run, '-o', 'jsonpath={.spec.parallelism}')).toBe('0');
-  await expect.poll(() => kubectl('get', 'job', run, '-o',
-    'jsonpath={.status.conditions[?(@.type=="Failed")].reason}'), { timeout: 30_000 }).toBe('DeadlineExceeded');
-  expect(kubectl('get', 'pod', '-l', 'job-name=' + run, '-o', 'jsonpath={.items[*].status.phase}'))
-    .not.toMatch(/Running|Pending/);
-  expect((await (await request.get(apiRoot + '/runs/' + run)).json()).status).toBe('Canceled');
-  await page.getByRole('button', { name: 'Löschen', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Ausführungen' })).toBeVisible();
-  expect((await request.get(apiRoot + '/runs/' + run)).status()).toBe(404);
+  const fixture = kubectl('create', '-f', 'test/e2e/fixtures/wait-workflow.yaml', '-o', 'jsonpath={.metadata.name}');
+  try {
+    await page.goto(pageRoot + '/runs/' + fixture);
+    await expect(page.locator('pre')).toContainText('waiting for cancellation', { timeout: 60_000 });
+    const run = page.url().split('/').pop()!;
+    const pods = () => kubectl('get', 'pod', '-l', 'workflows.argoproj.io/workflow=' + run, '-o', 'name').trim();
+    expect(pods()).toMatch(/^pod\//);
+    await page.getByRole('button', { name: 'Abbrechen', exact: true }).click();
+    await expect(page.getByText('Canceled', { exact: true })).toBeVisible({ timeout: 90_000 });
+    expect(kubectl('get', 'workflow', run, '-o', 'jsonpath={.spec.shutdown}')).toBe('Terminate');
+    expect(kubectl('get', 'pod', '-l', 'workflows.argoproj.io/workflow=' + run, '-o', 'jsonpath={.items[*].status.phase}'))
+      .not.toMatch(/Running|Pending/);
+    expect((await (await request.get(apiRoot + '/runs/' + run)).json()).status).toBe('Canceled');
+    await page.getByRole('button', { name: 'Löschen', exact: true }).click();
+    await expect(page.getByRole('heading', { name: 'Ausführungen' })).toBeVisible();
+    expect((await request.get(apiRoot + '/runs/' + run)).status()).toBe(404);
+  } finally {
+    kubectl('delete', 'workflow', fixture, '--ignore-not-found');
+  }
 });
 
 test('schedule details and inherited light and dark Headlamp themes', async ({ browser }) => {

@@ -6,7 +6,7 @@ export const jobId = z.string().max(40).regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 export const fieldName = z.string().max(48).regex(/^[a-zA-Z][a-zA-Z0-9_]*$/)
   .refine(name => !['constructor', 'prototype'].includes(name));
 
-const parameter = z.strictObject({
+export const parameter = z.strictObject({
   name: fieldName,
   label: z.string().min(1),
   type: z.enum(['text', 'multiline', 'integer', 'boolean', 'enum', 'date', 'file']),
@@ -21,13 +21,42 @@ const quantities = z.strictObject({
   memory: z.string().regex(/^(?:[1-9]\d{0,3}Mi|[1-2]Gi)$/).refine(v => !v.endsWith('Mi') || parseInt(v) <= 2048),
 });
 
+const grant = z.strictObject({
+  users: z.array(z.string().min(1).max(1024)).default([]),
+  groups: z.array(z.string().min(1).max(256)).default([]),
+});
+
+export const access = z.strictObject({
+  view: grant.optional(),
+  run: grant.optional(),
+  approve: grant.optional(),
+  manage: grant.optional(),
+});
+
+export const execution = z.strictObject({
+  serial: z.boolean().default(true),
+  timeoutSeconds: z.number().int().min(1).max(604800).default(3600),
+});
+
+const output = z.strictObject({
+  name: jobId,
+  label: z.string().min(1),
+  path: z.string().max(240).regex(/^[a-zA-Z0-9_-][a-zA-Z0-9_.-]*(?:\/[a-zA-Z0-9_-][a-zA-Z0-9_.-]*)*$/),
+  parameter: fieldName,
+  optional: z.boolean().default(false),
+});
+
 export const definition = z.strictObject({
-  schemaVersion: z.literal(1),
+  schemaVersion: z.literal(2),
   id: jobId,
   name: z.string().min(1),
   description: z.string().min(1),
   runtime: z.literal('gretl'),
   script: z.string().regex(/^[\w-]+\.groovy$/),
+  exposed: z.boolean().default(true),
+  access: access.default({}),
+  outputs: z.array(output).max(32).default([]),
+  execution: execution.default({ serial: true, timeoutSeconds: 3600 }),
   parameters: z.array(parameter).max(32).default([]),
   resources: quantities.default({ cpu: '250m', memory: '512Mi' }),
   schedule: z.strictObject({ cron: z.string(), timeZone: z.string().default('Europe/Zurich') }).optional(),
@@ -88,7 +117,19 @@ function validValue(p: Parameter, value: unknown) {
 
 export function parseJob(input: unknown): Job {
   const job = definition.parse(input);
+  if (job.schedule && !job.exposed) throw new Error('An internal job cannot be scheduled');
   const names = new Set<string>();
+  const outputNames = new Set<string>();
+  const outputPaths = new Set<string>();
+  for (const item of job.outputs) {
+    if (names.has(item.parameter) || outputNames.has(item.name) || outputPaths.has(item.path) ||
+      [...outputPaths].some(path => item.path.startsWith(path + '/') || path.startsWith(item.path + '/'))) {
+      throw new Error(`Conflicting output: ${item.name}`);
+    }
+    names.add(item.parameter);
+    outputNames.add(item.name);
+    outputPaths.add(item.path);
+  }
   for (const p of job.parameters) {
     if (names.has(p.name)) throw new Error(`Duplicate parameter: ${p.name}`);
     names.add(p.name);

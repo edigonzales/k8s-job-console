@@ -5,7 +5,8 @@ metadata:
   labels:
     job-console.io/test-fixture: "true"
 spec:
-  serviceAccountName: job-console-executor
+  automountServiceAccountToken: false
+  executor: {serviceAccountName: job-console-executor}
   entrypoint: smoke
   activeDeadlineSeconds: 300
   ttlStrategy:
@@ -55,6 +56,10 @@ spec:
       container:
         image: job-console-gretl:18eaf3254a16
         imagePullPolicy: Never
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
         command: [/bin/sh, -c]
         args: ["test -s /work/input.csv"]
         volumeMounts: [{name: work, mountPath: /work}]
@@ -73,6 +78,10 @@ spec:
       container:
         image: job-console-gretl:18eaf3254a16
         imagePullPolicy: Never
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
         command: [/opt/gretl/bin/gretl]
         args:
           - run
@@ -93,11 +102,13 @@ spec:
         artifacts:
           - {name: report, path: /reports/report.json, archive: {none: {}}}
     - name: review
-      suspend: {duration: 240s}
+      suspend: {}
       outputs:
         parameters:
-          - name: decision
-            valueFrom: {supplied: {}}
+          - {name: decision, valueFrom: {supplied: {}}}
+          - {name: decidedBy, valueFrom: {supplied: {}}}
+          - {name: decidedAt, valueFrom: {supplied: {}}}
+          - {name: note, valueFrom: {supplied: {}}}
     - name: verify
       inputs:
         artifacts:
@@ -107,6 +118,10 @@ spec:
       container:
         image: job-console-gretl:18eaf3254a16
         imagePullPolicy: Never
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
         command: [/bin/sh, -ec]
         args:
           - 'test "$1" = approved && test -s /work/report.json && cat /work/report.json'

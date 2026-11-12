@@ -27,14 +27,29 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: edigonzales/gretl-runtime-jobs
-          ref: efd4d12792c8f2b4aca5d41b99c393911ec199b2
+          ref: 35afdfaf264c9b0b51785121a1a446eeaef2d660
           path: gretl-runtime-jobs
       - name: Validate example definitions and manifests
         working-directory: k8s-job-console
         run: |
-          npm run generate
+          npm run generate -- --image job-console-gretl:ci
+          mkdir -p build/argo-schemas
+          curl -fsSL https://github.com/argoproj/argo-workflows/releases/download/v4.1.6/namespace-install.yaml |
+            node --input-type=module -e '
+              import { readFileSync, writeFileSync } from "node:fs";
+              import { parseAllDocuments } from "yaml";
+              for (const document of parseAllDocuments(readFileSync(0, "utf8"))) {
+                const resource = document.toJS();
+                if (resource.kind !== "CustomResourceDefinition") continue;
+                const schema = resource.spec.versions.find(version => version.name === "v1alpha1")?.schema?.openAPIV3Schema;
+                if (schema) writeFileSync("build/argo-schemas/" + resource.spec.names.kind + ".json", JSON.stringify(schema));
+              }
+            '
           docker run --rm -v "$PWD:/work:ro" ghcr.io/yannh/kubeconform:v0.7.0 \
-            -strict -kubernetes-version 1.35.0 /work/deploy /work/build/generated/scripts.yaml /work/build/generated/cronjobs.yaml /work/build/generated/catalog-configmap.yaml
+            -strict -kubernetes-version 1.35.0 -schema-location default \
+            -schema-location '/work/build/argo-schemas/{{.ResourceKind}}.json' \
+            /work/deploy /work/build/generated/cronworkflows.yaml /work/build/generated/catalog-configmap.yaml \
+            /work/scripts/argo-smoke.yaml /work/test/e2e/fixtures/wait-workflow.yaml
       - name: Build images
         working-directory: k8s-job-console
         run: |

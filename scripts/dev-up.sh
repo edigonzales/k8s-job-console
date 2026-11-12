@@ -11,7 +11,10 @@ runtime=$(cd "${GRETL_DIR:-../gretl-runtime}" && pwd)
   "$runtime/scripts/build-runtime-image.sh" --distribution gretl-dist/target/dist \
     --output "$ROOT/build/runtime-image" --source "$(git rev-parse HEAD)"
 )
-docker tag "$(cat build/runtime-image/image-id.txt)" job-console-gretl:local
+runtime_id=$(cat build/runtime-image/image-id.txt)
+runtime_id=${runtime_id#sha256:}
+export GRETL_IMAGE=job-console-gretl:${runtime_id:0:12}
+docker tag "$runtime_id" "$GRETL_IMAGE"
 npm ci
 npm run build
 docker build -t job-console-control:local -f apps/control/Dockerfile .
@@ -36,6 +39,7 @@ if ! k wait --for=condition=complete "$init" --timeout=100s; then
   k logs "$init" || true
   exit 1
 fi
+./scripts/install-argo.sh
 ./scripts/deploy-jobs.sh
 k apply -f deploy/launcher.yaml -f deploy/headlamp.yaml
 k rollout restart deployment/launcher deployment/headlamp

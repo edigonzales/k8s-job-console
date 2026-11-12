@@ -36,15 +36,18 @@ port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) -> 2746$/\1/p' "$forwa
 # Argo's namespace installer uses a self-signed certificate on this local tunnel.
 token=$(k create token argo --duration=10m)
 url="https://127.0.0.1:$port/api/v1/workflows/job-console/$name/set"
+decided_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 decision() {
-  jq -nc --arg name "$name" --arg node "$node" --arg value "$1" '{
+  jq -nc --arg name "$name" --arg node "$node" --arg value "$1" --arg at "$decided_at" '{
     name: $name, namespace: "job-console", nodeFieldSelector: ("id="+$node),
-    phase: "Succeeded", outputParameters: ({decision: $value}|tojson)
+    phase: "Succeeded", outputParameters: ({decision: $value, decidedBy: "smoke-reviewer", decidedAt: $at, note: "Synthetic fixture"}|tojson)
   }' |
     curl -ksS -X PUT -H "Authorization: Bearer $token" -H 'Content-Type: application/json' --data-binary @- "$url"
 }
-decision approved | jq -e --arg node "$node" '
-  .status.nodes[$node] | select(.phase=="Succeeded" and .outputs.parameters[0].value=="approved") |
+decision approved | jq -e --arg node "$node" --arg at "$decided_at" '
+  .status.nodes[$node] | select(.phase=="Succeeded") |
+  (.outputs.parameters | map({key:.name,value:.value}) | from_entries) as $values |
+  select($values == {decision:"approved",decidedBy:"smoke-reviewer",decidedAt:$at,note:"Synthetic fixture"}) |
   {id, phase, outputs}'
 decision conflicting | jq -e 'select(.message | contains("no suspend nodes matching")) | .message'
 unset token
@@ -53,6 +56,9 @@ k wait --for=jsonpath='{.status.phase}'=Succeeded "$workflow" --timeout=90s
 for step in analyze verify; do
   pod=$(k get pods -l "workflows.argoproj.io/workflow=$name" -o name | rg -- "-$step-[0-9]+$")
   if [[ $step == analyze ]]; then
+    k get "$pod" -o json | jq -e '
+      .spec.containers[] | select(.name=="main") |
+      all(.volumeMounts[]; .mountPath != "/var/run/secrets/kubernetes.io/serviceaccount")' >/dev/null
     k logs "$pod" -c main | rg 'records=2 columns=2'
     k logs "$pod" -c init | rg 'S3 Load|artifactName=source'
     k logs "$pod" -c wait | rg 'S3 Save'

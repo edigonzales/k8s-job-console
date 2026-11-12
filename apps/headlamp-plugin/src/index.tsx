@@ -7,12 +7,12 @@ import {
 } from '@kinvolk/headlamp-plugin/lib';
 import React, { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { Link, useHistory, useParams } from 'react-router-dom';
-import { api, type Job, type JobDetail, launch, type Parameter, type Run, type Schedule, type Value } from './api';
+import { api, prefix, type ResultFile, type Job, type JobDetail, launch, type Parameter, type Run, type Schedule, type Value } from './api';
 
 const root = '/job-console';
-const statuses = ['Pending', 'Running', 'Succeeded', 'Failed', 'Canceled'] as const;
+const statuses = ['Pending', 'Queued', 'Running', 'AwaitingInput', 'Canceling', 'Succeeded', 'Failed', 'Canceled', 'Rejected'] as const;
 const date = (value?: string) => value ? new Date(value).toLocaleString('de-CH') : '–';
-const active = (run: Run) => run.status === 'Pending' || run.status === 'Running';
+const active = (run: Run) => ['Pending', 'Queued', 'Running', 'AwaitingInput', 'Canceling'].includes(run.status);
 const jobLink = (id: string) => root + '/jobs/' + id;
 const runLink = (name: string) => root + '/runs/' + name;
 
@@ -65,7 +65,8 @@ function Rows({ headers, rows, empty }: { headers: string[]; rows: { key: string
 }
 
 function Status({ status }: { status: Run['status'] }) {
-  const color = { Pending: 'default', Running: 'info', Succeeded: 'success', Failed: 'error', Canceled: 'warning' } as const;
+  const color = { Pending: 'default', Queued: 'default', Running: 'info', AwaitingInput: 'warning',
+    Canceling: 'warning', Succeeded: 'success', Failed: 'error', Canceled: 'warning', Rejected: 'error' } as const;
   return <Chip size="small" label={status} color={color[status]} />;
 }
 
@@ -251,10 +252,12 @@ function RunDetails() {
   const path = '/runs/' + encodeURIComponent(name ?? '');
   const run = useApi<Run>(path, 3000);
   const logs = useApi<{ logs: string; message?: string }>(path + '/logs', 3000);
+  const files = useApi<ResultFile[]>(path + '/artifacts', 3000);
+  const job = useApi<JobDetail>('/jobs/' + encodeURIComponent(run.data?.jobId ?? ''));
   const jobs = useApi<Job[]>('/jobs');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  async function updateRun(action: 'cancel' | 'delete') {
+  async function updateRun(action: 'cancel' | 'delete' | 'repeat') {
     if (busy) return;
     setBusy(true);
     setError('');
@@ -262,6 +265,9 @@ function RunDetails() {
       if (action === 'cancel') {
         await api(path + '/cancel', { method: 'POST' });
         run.refresh();
+      } else if (action === 'repeat') {
+        const repeated = await api<Run>(path + '/repeat', { method: 'POST' });
+        history.push(runLink(repeated.name));
       } else {
         await api(path, { method: 'DELETE' });
         history.push(root + '/runs');
@@ -273,16 +279,24 @@ function RunDetails() {
   const jobName = jobs.data?.find(job => job.id === run.data?.jobId)?.name ?? run.data?.jobId;
   return <Page title={jobName ?? 'Ausführung'}><Load state={run}>{data => <>
     <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>{data.name} · {date(data.started ?? data.created)}</Typography>
+    {data.revision && <Typography variant="body2" sx={{ overflowWrap: 'anywhere' }}>
+      Git {data.revision} · {data.image} · {data.scheduled ? 'Zeitplan' : 'Manuell'}
+    </Typography>}
     <Stack direction="row" spacing={1} alignItems="center">
       <Status status={data.status} />
       {data.reason && <Typography>{data.reason}</Typography>}
     </Stack>
     {error && <Alert severity="error">{error}</Alert>}
     <Stack direction="row" spacing={1}>
-      <Button variant="outlined" onClick={() => { run.refresh(); logs.refresh(); }}>Aktualisieren</Button>
+      <Button variant="outlined" onClick={() => { run.refresh(); logs.refresh(); files.refresh(); }}>Aktualisieren</Button>
       {active(data)
-        ? <Button variant="outlined" color="warning" disabled={busy} onClick={() => updateRun('cancel')}>Abbrechen</Button>
-        : <Button variant="outlined" color="error" disabled={busy} onClick={() => updateRun('delete')}>Löschen</Button>}
+        ? <Button variant="outlined" color="warning" disabled={busy || data.status === 'Canceling'} onClick={() => updateRun('cancel')}>Abbrechen</Button>
+        : <>
+          {job.data?.parameters.some(parameter => parameter.type === 'file')
+            ? <Button component={Link} to={jobLink(data.jobId)} variant="outlined">Mit neuer Datei starten</Button>
+            : <Button variant="outlined" disabled={busy} onClick={() => updateRun('repeat')}>Wiederholen</Button>}
+          <Button variant="outlined" color="error" disabled={busy} onClick={() => updateRun('delete')}>Löschen</Button>
+        </>}
     </Stack>
     {Object.keys(data.parameters).length > 0 && <Box component="dl" sx={{ m: 0, overflowWrap: 'anywhere' }}>
       {Object.entries(data.parameters).map(([key, value]) => <React.Fragment key={key}>
@@ -290,6 +304,16 @@ function RunDetails() {
         <Typography component="dd" sx={{ ml: 2, whiteSpace: 'pre-wrap' }}>{String(value)}</Typography>
       </React.Fragment>)}
     </Box>}
+    <Load state={files}>{items => items.length > 0 && <>
+      <Typography variant="h6" component="h2">Ergebnisdateien</Typography>
+      <Rows headers={['Datei', 'Schritt', 'Grösse', 'Aktion']} empty="" rows={items.map(item => ({
+        key: item.id, cells: [item.label + ' · ' + item.name, item.step,
+          item.size === undefined ? '–' : `${item.size.toLocaleString('de-CH')} B`,
+          item.available
+            ? <Button href={prefix + path + '/artifacts/' + encodeURIComponent(item.id)}>Herunterladen</Button>
+            : 'Nicht verfügbar'],
+      }))} />
+    </>}</Load>
     <Typography variant="h6" component="h2">Logs</Typography>
     <Load state={logs}>{result => result.logs ? <Paper component="pre" variant="outlined" tabIndex={0}
       sx={{ p: 2, m: 0, maxHeight: '55vh', overflow: 'auto', whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>

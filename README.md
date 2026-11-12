@@ -1,10 +1,10 @@
 # Kubernetes Job Console
 
 GRETL-Jobs in Headlamp parametrisieren, starten und überwachen. Der Generator
-liest die Definitionen aus Git und erzeugt Katalog, Script-ConfigMaps und
-CronJobs. Der Launcher validiert Eingaben und startet Kubernetes Jobs. Bei
-Dateiuploads speichert er die Daten in RustFS. Ein InitContainer legt die
-Eingaben für GRETL ab. Kubernetes liefert Status, Zeitpläne und Pod-Logs.
+liest Schema-V2-Definitionen aus einem Git-Commit. Der Launcher startet manuelle
+Ausführungen über die interne Argo-API. Zeitpläne verwenden Argo CronWorkflows.
+Argo lädt die vollständige Git-Revision und die RustFS-Eingaben, startet GRETL
+und speichert deklarierte Ergebnisdateien in RustFS.
 
 ## Lokal starten
 
@@ -36,47 +36,45 @@ Passe dazu den Proxy-Pfad an. Im lokalen Modus bleiben Browser-Anfragen
 lokalen Einzelbenutzerbetrieb konfiguriert. Für Mehrbenutzerbetrieb sind Authentisierung, Autorisierung,
 TLS und eine geeignete Secret-Verwaltung erforderlich.
 
-`dev-up.sh` baut die GRETL-Distribution und das generische Image bei jedem
-Aufruf aus dem aktuellen Runtime-Checkout. Docker kann passende Build-Schichten
-wiederverwenden. Die Deployment- und Generator-Vorgaben verwenden
-`job-console-gretl:local` und `job-console-control:local`.
-`dev-down.sh` entfernt die
-Anwendung und behält den RustFS-Datenträger. `dev-down.sh --purge-storage`
-entfernt den reservierten Namespace samt Daten.
+`dev-up.sh` baut das generische GRETL-Image aus dem Runtime-Checkout und
+kennzeichnet den lokalen Build mit seiner Image-ID. Der offizielle
+[Argo-Namespace-Installer v4.1.6](https://github.com/argoproj/argo-workflows/releases/tag/v4.1.6)
+stellt einen Workflow-Controller und einen internen API-Server bereit.
+`dev-down.sh` erhält den RustFS-Datenträger. `dev-down.sh --purge-storage`
+entfernt den Datenträger ausdrücklich.
 
 ## Jobs bereitstellen
 
 ```sh
 npm ci
 npm run build
+export GRETL_IMAGE=job-console-gretl:BUILD_ID
 npm run generate -- --jobs-dir ../gretl-runtime-jobs --output build/generated
 ./scripts/deploy-jobs.sh
 ```
 
-Die Ausgabedateien enthalten Katalog, ConfigMaps und CronJobs. Das Deployment
-validiert sie am Kubernetes-API-Server und lädt den Launcher nach Änderungen
-neu. Der Generator unterstützt numerische fünfstellige Kubernetes-Cron-Ausdrücke,
-übliche Monats- und Wochentagskürzel sowie `H`, `H(min-max)` und `H/step`
-in Minuten und Stunden. Kubernetes interpretiert den Zeitplan in der
-angegebenen Zeitzone. Bei Zeitumstellungen können lokale Uhrzeiten ausfallen
-oder wiederholt auftreten.
+Der Generator verwendet den aktuellen Jobs-Commit. Der Commit muss beim
+konfigurierten Git-Remote abrufbar sein. Das Deployment validiert Katalog und
+CronWorkflows am Kubernetes-API-Server. Der Generator unterstützt fünf
+Cron-Felder, Monats- und Wochentagskürzel sowie `H`, `H(min-max)` und
+`H/step` in Minuten und Stunden. Argo verwendet die angegebene Zeitzone.
+Bei Zeitumstellungen können lokale Uhrzeiten ausfallen oder wiederholt auftreten.
 
-Eine Definition unterstützt bis zu 32 Parameter. Serialisierte Parameterwerte
-dürfen zusammen 128 KiB belegen. Der Launcher verarbeitet jeweils einen
-Dateiupload mit maximal 512 MiB pro Datei und 1 GiB pro Ausführung. RustFS bewahrt
-Objekte standardmässig sieben Tage auf. Die Grenze lässt sich über
-`S3_RETENTION_DAYS` beim Initialisieren des Buckets konfigurieren. Die übrigen
-S3-Einstellungen stehen in `deploy/storage.yaml`, Zugangsdaten im Kubernetes
-Secret. Job-Pods mounten die Eingaben read-only. Die Scripts stammen aus dem
-vertrauenswürdigen Job-Repository und sind ausführbarer Code.
+Eine Definition unterstützt bis zu 32 Parameter mit zusammen höchstens
+128 KiB serialisierten Werten. Der Launcher verarbeitet jeweils einen
+Dateiupload mit höchstens 512 MiB pro Datei und 1 GiB pro Ausführung.
+RustFS bewahrt Eingaben und Ergebnisse standardmässig 30 Tage auf.
+Zugangsdaten liegen im Kubernetes Secret. GRETL erhält Parameter über
+die native JSON-Parameterdatei, Eingaben unter `/inputs` und
+systemgesetzte Ausgabepfade unter `/outputs`.
 
-Abgeschlossene Jobs haben sieben Tage TTL. CronJobs bewahren bis zu drei
-erfolgreiche und zwei fehlgeschlagene Ausführungen auf. Beim Abbruch setzt der
-Launcher die Parallelität auf null und verkürzt die Kubernetes-Job-Frist.
-Kubernetes beendet den Pod, schliesst den Job ab und kann danach den nächsten
-CronJob-Lauf starten. Die Oberfläche zeigt den abgebrochenen Lauf als
-`Canceled`. Abgeschlossene Läufe können über **Löschen** entfernt werden.
-Pod-Logs sind verfügbar, solange Kubernetes den Pod aufbewahrt.
+Serielle Jobs verwenden einen Argo-Mutex je stabiler Job-ID. Manuelle und
+geplante Läufe teilen dieselbe Sperre. Lokale Mutexes setzen einen aktiven
+Workflow-Controller voraus. Die Console behält abgeschlossene Workflows
+sieben Tage. Sie zeigt die Git-Revision, das Runtime-Image, Logs und
+verfügbare Ergebnisdateien. **Abbrechen** terminiert über Argo.
+**Wiederholen** startet einen neuen Lauf mit dem aktuellen Katalogstand.
+Bei Dateieingaben führt der Link zurück zum Startformular.
 
 ## Tests und Fehlerdiagnose
 
@@ -90,9 +88,11 @@ npx playwright install chromium
 ```
 
 Der E2E-Test braucht eine laufende lokale Installation und den Port-Forward.
-Er testet reale Jobs, einen 100-MiB-Upload, Abbruch, Zeitplanung und Neustart.
-Für den Abbruchtest wird ein temporärer Job in den Katalog aufgenommen und
-am Ende entfernt. Der E2E-Test stellt den ursprünglichen Zeitplan wieder her.
+Er prüft reale GRETL-Läufe, Browserdownloads, Streaming-Uploads,
+Abbruch und gemeinsame Sperren. Der V2-0-Durchstich
+`./scripts/argo-smoke.sh` braucht zusätzlich das Runtime-Image
+`job-console-gretl:18eaf3254a16`, gebaut vom Runtime-Commit
+`18eaf3254a16c121362b78406be7c01c95f152c7`.
 
 Bei Startproblemen prüfe `kubectl -n job-console get pods` und
 `kubectl -n job-console logs deploy/launcher`. Wenn der Port-Forward beim

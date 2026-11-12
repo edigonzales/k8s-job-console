@@ -4,14 +4,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { test } from 'node:test';
-import type { BatchV1Api, CoreV1Api, V1Job } from '@kubernetes/client-node';
+import type { CoreV1Api, CustomObjectsApi } from '@kubernetes/client-node';
 import { parseJob, resolveCron, validateValues } from './catalog.js';
-import { cronJob, jobSpec, labels, manualJob } from './manifests.js';
+import { cronWorkflow, workflow, type Source } from './workflows.js';
+import type { argoClient, Workflow } from './argo.js';
 import { buildApp, runState } from './launcher.js';
 import type { storage } from './storage.js';
 
 const base = {
-  id: 'hello', schemaVersion: 1, name: 'Hello', description: 'Example', runtime: 'gretl', script: 'job.groovy',
+  id: 'hello', schemaVersion: 2, name: 'Hello', description: 'Example', runtime: 'gretl', script: 'job.groovy',
   parameters: [
     { name: 'message', label: 'Message', type: 'text', required: true },
     { name: 'number', label: 'Number', type: 'integer', default: 1 },
@@ -20,11 +21,12 @@ const base = {
     { name: 'separator', label: 'Separator', type: 'enum', options: [{ value: ',', label: 'Comma' }] },
   ],
 };
-const job = parseJob(base);
-const fileJob = parseJob({ ...base, id: 'files', parameters: [
+const source: Source = { repository: 'https://example.org/jobs.git', revision: 'a'.repeat(40), image: 'gretl:test' };
+const job = { ...parseJob(base), source };
+const fileJob = { ...parseJob({ ...base, id: 'files', parameters: [
   { name: 'file', label: 'CSV', type: 'file', required: true, accept: ['.csv'] },
   { name: 'other', label: 'Second CSV', type: 'file', accept: ['.csv'] },
-] });
+] }), source };
 
 test('typed values, defaults, calendar dates, required values and unknown values', () => {
   assert.deepEqual(validateValues(job, { message: 'Hello', when: '2024-02-29', separator: ',' }),
@@ -44,7 +46,7 @@ test('schema rejects duplicate parameters, path traversal, resources and invalid
     { ...base, resources: { cpu: '3000m', memory: '4Gi' } }, { ...base, id: '../hello' },
     { ...base, parameters: [{ name: 'when', label: 'Date', type: 'date', default: '2026-02-29' }] },
     { ...base, schedule: { cron: '* * * * *' } },
-    { ...fileJob, schedule: { cron: '* * * * *' } },
+    { ...base, parameters: fileJob.parameters, schedule: { cron: '* * * * *' } },
   ]) assert.throws(() => parseJob(invalid));
 });
 
@@ -62,17 +64,26 @@ test('cron resolves deterministic offsets and accepts Kubernetes grammar', () =>
     '0 0 * * 7', '0 0 * * 1-7', '0 0 * * 6-7', '0 0 * * 0,7']) assert.throws(() => cron('hello', invalid));
 });
 
-test('manifests use a shared restricted pod template and literal arguments', () => {
-  const scheduled = parseJob({ ...base, parameters: [], schedule: { cron: 'H * * * *' } });
-  assert.deepEqual(cronJob(scheduled).spec?.jobTemplate.spec, jobSpec(scheduled, {}, []));
-  const spec = jobSpec(job, { message: '$(HOME);literal' }, []).template.spec!;
+test('manual and cron use the same workflow and preserve literal values', () => {
+  const scheduled = { ...parseJob({ ...base, parameters: [], schedule: { cron: 'H * * * *' } }), source };
+  assert.deepEqual(cronWorkflow(scheduled).spec.workflowSpec, workflow(scheduled, undefined, {}, []).spec);
+  const literal = ['$(HOME)', '$HOME', '${HOME}', '{{workflow.name}}', '{{= 1 }}', '"', 'a\nb', 'Grüezi', ';'].join(' ');
+  const spec = workflow(job, 'hello-run', { message: literal }, []).spec;
+  const template = (spec.templates as {
+    inputs: { artifacts: { raw?: { data: string }; git?: { revision: string }; s3?: { key: string } }[] };
+    container: { args: string[]; securityContext: { readOnlyRootFilesystem: boolean } };
+    synchronization: { mutexes: { name: string }[] };
+  }[])[0];
   assert.equal(spec.automountServiceAccountToken, false);
-  assert.equal(spec.containers[0].securityContext?.readOnlyRootFilesystem, true);
-  assert.ok(spec.containers[0].args?.includes('message=$$(HOME);literal'));
-  const upload = jobSpec(fileJob, {}, ['file'], 'files-run').template.spec!;
-  assert.ok(upload.containers[0].args?.includes('file=/inputs/file'));
-  assert.equal(upload.containers[0].envFrom, undefined);
-  assert.equal(upload.initContainers?.[0].envFrom?.[1]?.secretRef?.name, 'job-console-storage');
+  assert.equal(template.container.securityContext.readOnlyRootFilesystem, true);
+  assert.ok(template.container.args.includes('/work/parameters.json'));
+  assert.equal(template.inputs.artifacts[0].git?.revision, source.revision);
+  assert.equal(template.synchronization.mutexes[0].name, 'job-hello');
+  assert.equal(JSON.parse(template.inputs.artifacts[1].raw!.data).message, literal);
+  assert.ok(!template.inputs.artifacts[1].raw!.data.includes('{{'));
+  const upload = workflow(fileJob, 'files-run', {}, ['file']).spec.templates as typeof template[];
+  assert.equal(upload[0].inputs.artifacts[2].s3?.key, 'runs/files-run/inputs/file');
+  assert.equal(JSON.parse(upload[0].inputs.artifacts[1].raw!.data).file, '/inputs/file');
 });
 
 test('generator writes deterministic manifests and rejects symlink scripts', async () => {
@@ -81,53 +92,57 @@ test('generator writes deterministic manifests and rejects symlink scripts', asy
     await mkdir(join(dir, 'jobs/hello'), { recursive: true });
     await writeFile(join(dir, 'jobs/hello/job.yaml'), JSON.stringify(base));
     await writeFile(join(dir, 'jobs/hello/job.groovy'), 'println "hello"');
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
+    git('init');
+    const commit = () => {
+      git('add', 'jobs');
+      git('-c', 'user.name=Test', '-c', 'user.email=test@example.org', 'commit', '-m', 'fixture');
+    };
+    commit();
     const generate = (name: string) => execFileSync(process.execPath,
-      ['build/control/generate.js', '--jobs-dir', dir, '--output', join(dir, name)]);
+      ['build/control/generate.js', '--jobs-dir', dir, '--output', join(dir, name), '--repository', source.repository, '--image', source.image]);
     generate('one');
     generate('two');
-    for (const file of ['catalog.json', 'scripts.yaml', 'catalog-configmap.yaml', 'cronjobs.yaml']) {
+    for (const file of ['catalog.json', 'catalog-configmap.yaml', 'cronworkflows.yaml']) {
       assert.deepEqual(await readFile(join(dir, 'one', file)), await readFile(join(dir, 'two', file)));
     }
     await rm(join(dir, 'jobs/hello/job.groovy'));
     const { symlink } = await import('node:fs/promises');
     await symlink(join(dir, 'jobs/hello/job.yaml'), join(dir, 'jobs/hello/job.groovy'));
-    assert.throws(() => generate('bad'), /Invalid script/);
+    commit();
+    assert.throws(() => generate('bad'), /Git symlinks/);
   } finally {
     await rm(dir, { recursive: true });
   }
 });
 
 test('HTTP validation, upload limits, namespace isolation and cancellation', async t => {
-  const created: V1Job[] = [];
+  const created: Workflow[] = [];
   const deleted: string[] = [];
   let createFailure: number | undefined;
   let uploadFailure = false;
   let cleanupFailure = false;
-  const managed = manualJob(job, 'hello-existing', { message: 'x' }, []);
-  managed.metadata!.resourceVersion = '10';
-  managed.metadata!.uid = 'managed-uid';
-  const foreign: V1Job = { metadata: { name: 'other', labels: { app: 'other' } } };
-  const batch = {
-    createNamespacedJob: async ({ namespace, body }: { namespace: string; body: V1Job }) => {
-      assert.equal(namespace, 'job-console');
+  const managed = workflow(job, 'hello-existing', { message: 'x' }, []);
+  managed.metadata.uid = 'managed-uid';
+  const foreign = { ...managed, metadata: { name: 'other', labels: { app: 'other' } } };
+  const argo = {
+    create: async (body: Workflow) => {
       if (createFailure) throw Object.assign(new Error('sensitive Kubernetes error'), { code: createFailure });
       created.push(body);
       return body;
     },
-    listNamespacedJob: async () => ({ items: created }),
-    listNamespacedCronJob: async () => ({ items: [] }),
-    readNamespacedJob: async ({ name }: { name: string }) => name === 'other' ? foreign : managed,
-    patchNamespacedJob: async ({ body }: { body: { value: unknown }[] }) => {
-      assert.equal(body[0].value, '10');
-      managed.metadata!.annotations = body[1].value as Record<string, string>;
-      managed.spec!.parallelism = body[2].value as number;
-      managed.spec!.activeDeadlineSeconds = body[3].value as number;
+    list: async () => ({ items: created }),
+    get: async (name: string) => name === 'other' ? foreign : managed,
+    terminate: async () => {
+      managed.spec.shutdown = 'Terminate';
       return managed;
     },
-    deleteNamespacedJob: async () => ({}),
-  } as unknown as BatchV1Api;
+    remove: async () => ({}),
+  } as unknown as ReturnType<typeof argoClient>;
   const core = { listNamespacedPod: async () => ({ items: [] }) } as unknown as CoreV1Api;
-  const s3: Pick<ReturnType<typeof storage>, 'upload' | 'remove'> = {
+  const s3: Pick<ReturnType<typeof storage>, 'upload' | 'remove' | 'download' | 'stat'> = {
+    stat: async () => { throw new Error('Unexpected artifact'); },
+    download: async () => { throw new Error('Unexpected download'); },
     upload: async (name, field, source, count) => {
       assert.match(name, /^files-[a-f0-9]{12}$/);
       assert.ok(['file', 'other'].includes(field));
@@ -139,7 +154,7 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
       if (cleanupFailure) throw new Error('sensitive cleanup error');
     },
   };
-  const app = await buildApp([job, fileJob], batch, core, 'job-console', s3, { file: 12, total: 15 });
+  const app = await buildApp([job, fileJob], argo, core, {} as CustomObjectsApi, 'job-console', s3, { file: 12, total: 15 });
   t.after(() => app.close());
   const send = (id: string, payload: unknown, origin?: string) => app.inject({
     method: 'POST', url: '/api/jobs/' + id + '/runs', headers: origin ? { origin } : {},
@@ -161,7 +176,7 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
   assert.equal((await upload([['file', 'large.csv', 'a'.repeat(13)]])).statusCode, 413);
   assert.equal((await upload([['file', 'a.csv', 'a'.repeat(9)], ['other', 'b.csv', 'b'.repeat(9)]])).statusCode, 413);
   assert.deepEqual(deleted, ['file', 'file', 'other']);
-  assert.deepEqual(created[0].metadata?.labels, labels('hello'));
+  assert.deepEqual(created[0].metadata?.labels, managed.metadata.labels);
 
   uploadFailure = true;
   cleanupFailure = true;
@@ -183,9 +198,11 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
   assert.equal(created.length, 2);
   assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/other' })).statusCode, 404);
   assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/hello-existing' })).statusCode, 409);
-  assert.equal((await app.inject({ method: 'POST', url: '/api/runs/hello-existing/cancel' })).json().status, 'Canceled');
-  assert.equal(managed.spec?.parallelism, 0);
-  assert.equal(managed.spec?.activeDeadlineSeconds, 1);
+  assert.equal((await app.inject({ method: 'POST', url: '/api/runs/hello-existing/cancel' })).json().status, 'Canceling');
+  assert.equal(managed.spec.shutdown, 'Terminate');
+  assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/hello-existing' })).statusCode, 409);
+  managed.status = { phase: 'Failed' };
+  assert.equal(runState(managed).status, 'Canceled');
   assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/hello-existing' })).statusCode, 204);
 });
 
@@ -196,10 +213,11 @@ test('aggregate parameter values stay within the annotation and command budget',
   assert.throws(() => validateValues(largeJob, values), /Total parameter size/);
 });
 
-test('Kubernetes failure and waiting reasons surface', () => {
-  assert.deepEqual(runState({ status: { conditions: [{ type: 'Failed', status: 'True', reason: 'DeadlineExceeded' }] } }),
+test('Argo failure and Kubernetes waiting reasons surface', () => {
+  const pending = workflow(job, 'hello-wait', { message: 'x' }, []);
+  assert.deepEqual(runState({ ...pending, status: { phase: 'Failed', message: 'DeadlineExceeded' } }),
     { status: 'Failed', reason: 'DeadlineExceeded' });
-  assert.deepEqual(runState({}, { status: { phase: 'Pending', containerStatuses: [{
+  assert.deepEqual(runState(pending, [{ status: { phase: 'Pending', containerStatuses: [{
     name: 'gretl', image: 'gretl', imageID: '', ready: false, restartCount: 0, state: { waiting: { reason: 'ImagePullBackOff' } },
-  }] } }), { status: 'Pending', reason: 'ImagePullBackOff' });
+  }] } }]), { status: 'Pending', reason: 'ImagePullBackOff' });
 });

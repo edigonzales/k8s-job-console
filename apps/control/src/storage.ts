@@ -1,15 +1,13 @@
-import { createWriteStream } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable, Transform } from 'node:stream';
-import { S3Client, GetObjectCommand, CreateBucketCommand, HeadBucketCommand, DeleteObjectCommand,
+import { S3Client, GetObjectCommand, CreateBucketCommand, HeadBucketCommand, HeadObjectCommand, DeleteObjectCommand,
   PutBucketLifecycleConfigurationCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
-import { fieldName } from './catalog.js';
 
 const MiB = 1024 ** 2;
 export const fileLimit = 512 * MiB;
 export const totalLimit = 1024 * MiB;
-const key = (name: string, field: string) => `runs/${name}/inputs/${field}`;
+export const inputKey = (name: string, field: string) => `runs/${name}/inputs/${field}`;
 
 export function storage() {
   const bucket = process.env.S3_BUCKET ?? 'job-console';
@@ -31,7 +29,7 @@ export function storage() {
         },
       });
       const upload = new Upload({
-        client, params: { Bucket: bucket, Key: key(name, field), Body: meter },
+        client, params: { Bucket: bucket, Key: inputKey(name, field), Body: meter },
         partSize: 5 * MiB, queueSize: 1,
       });
       const sending = upload.done().catch(error => { meter.destroy(error as Error); throw error; });
@@ -41,11 +39,22 @@ export function storage() {
       for (const result of results) if (result.status === 'rejected') throw result.reason;
     },
     async remove(name: string, field: string) {
-      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key(name, field) }));
+      await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: inputKey(name, field) }));
     },
-    async download(name: string, field: string) {
-      const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key(name, field) }));
-      await pipeline(response.Body as Readable, createWriteStream('/inputs/' + field, { mode: 0o600 }));
+    async stat(key: string) {
+      try {
+        const result = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+        return { available: true, size: result.ContentLength };
+      } catch (error) {
+        if ((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 404) {
+          return { available: false };
+        }
+        throw error;
+      }
+    },
+    async download(key: string) {
+      const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+      return { stream: response.Body as Readable, size: response.ContentLength };
     },
     async initialize() {
       try {
@@ -54,23 +63,14 @@ export function storage() {
         if ((error as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode !== 404) throw error;
         await client.send(new CreateBucketCommand({ Bucket: bucket }));
       }
-      const days = Number(process.env.S3_RETENTION_DAYS ?? 7);
-      if (!Number.isInteger(days) || days < 1) throw new Error('Invalid S3_RETENTION_DAYS');
+      const days = Number(process.env.S3_RETENTION_DAYS ?? 30);
+      if (!Number.isInteger(days) || days < 30) throw new Error('Invalid S3_RETENTION_DAYS');
       await client.send(new PutBucketLifecycleConfigurationCommand({
-        Bucket: bucket, LifecycleConfiguration: { Rules: [{
-          ID: 'expire-run-inputs', Status: 'Enabled', Filter: { Prefix: 'runs/' },
+        Bucket: bucket, LifecycleConfiguration: { Rules: ['runs/', 'artifacts/'].map(prefix => ({
+          ID: 'expire-' + prefix.slice(0, -1), Status: 'Enabled' as const, Filter: { Prefix: prefix },
           Expiration: { Days: days }, AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
-        }] },
+        })) },
       }));
     },
   };
-}
-
-export async function fetchInputs(name: string, fields: string[]) {
-  if (!/^[a-z0-9-]{1,63}$/.test(name) || !fields.length) throw new Error('Invalid run or file parameters');
-  const s3 = storage();
-  for (const field of fields) {
-    fieldName.parse(field);
-    await s3.download(name, field);
-  }
 }

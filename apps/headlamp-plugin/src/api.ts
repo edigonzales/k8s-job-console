@@ -34,14 +34,26 @@ export interface Run {
   created?: string;
   started?: string;
   finished?: string;
-  status: 'Pending' | 'Running' | 'Succeeded' | 'Failed' | 'Canceled';
+  status: 'Pending' | 'Queued' | 'Running' | 'AwaitingInput' | 'Canceling' | 'Succeeded' | 'Failed' | 'Canceled' | 'Rejected';
+  revision?: string;
+  image?: string;
+  steps: { id: string; name: string; status: string; reason?: string }[];
   reason?: string;
   parameters: Record<string, Value>;
   scheduled: boolean;
 }
 
 const apiBase = import.meta.env.VITE_JOB_CONSOLE_API?.replace(/\/+$/, '') || '/job-console-api';
-const prefix = apiBase + '/api';
+export interface ResultFile {
+  id: string;
+  name: string;
+  label: string;
+  step: string;
+  available: boolean;
+  size?: number;
+}
+
+export const prefix = apiBase + '/api';
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(prefix + path, { cache: 'no-store', ...options });
   if (response.status === 204) return undefined as T;

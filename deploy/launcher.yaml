@@ -15,11 +15,11 @@ kind: Role
 metadata:
   name: launcher
 rules:
-  - apiGroups: [batch]
-    resources: [jobs]
-    verbs: [create, get, list, patch, delete]
-  - apiGroups: [batch]
-    resources: [cronjobs]
+  - apiGroups: [argoproj.io]
+    resources: [workflows]
+    verbs: [create, get, list, patch, update, delete]
+  - apiGroups: [argoproj.io]
+    resources: [cronworkflows]
     verbs: [list]
   - apiGroups: [""]
     resources: [pods]
@@ -64,8 +64,8 @@ spec:
             capabilities: {drop: [ALL]}
           env:
             - {name: LOCAL_UNAUTHENTICATED, value: "true"}
-            - {name: GRETL_IMAGE, value: "job-console-gretl:local"}
-            - {name: CONTROL_IMAGE, value: "job-console-control:local"}
+            - {name: ARGO_ENDPOINT, value: "https://argo-server:2746"}
+            - {name: NODE_EXTRA_CA_CERTS, value: "/argo-ca/tls.crt"}
             - name: NAMESPACE
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
           envFrom:
@@ -77,10 +77,16 @@ spec:
           readinessProbe:
             httpGet: {path: /healthz, port: 8080}
             periodSeconds: 2
-          volumeMounts: [{name: catalog, mountPath: /catalog, readOnly: true}]
+          volumeMounts:
+            - {name: catalog, mountPath: /catalog, readOnly: true}
+            - {name: argo-ca, mountPath: /argo-ca, readOnly: true}
       volumes:
         - name: catalog
           configMap: {name: job-console-catalog}
+        - name: argo-ca
+          secret:
+            secretName: job-console-argo-tls
+            items: [{key: tls.crt, path: tls.crt}]
 ---
 apiVersion: v1
 kind: Service

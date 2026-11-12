@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: console-test-wait-
+  labels:
+    app.kubernetes.io/managed-by: job-console
+    job-console.io/job-id: scheduled-report
+    job-console.io/test-fixture: "true"
+spec:
+  automountServiceAccountToken: false
+  executor: {serviceAccountName: job-console-executor}
+  activeDeadlineSeconds: 240
+  entrypoint: wait
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    seccompProfile: {type: RuntimeDefault}
+  templates:
+    - name: wait
+      synchronization:
+        mutexes: [{name: job-scheduled-report}]
+      container:
+        image: node:22-bookworm-slim
+        command: [node, -e]
+        args: ['console.log("waiting for cancellation"); setInterval(() => {}, 1000)']
+        securityContext:
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
