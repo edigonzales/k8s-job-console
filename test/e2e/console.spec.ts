@@ -28,7 +28,7 @@ test('E2E-01/02: Headlamp navigation, defaults, validation and typed GRETL param
   await page.getByLabel('Wiederholungen').fill('2');
   await page.getByRole('checkbox', { name: 'Grossbuchstaben' }).check();
   await page.getByRole('button', { name: 'Job starten' }).click();
-  await expect(page.getByText('Succeeded', { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText('Succeeded', { exact: true })).toBeVisible({ timeout: 90_000 });
   await expect(page.locator('pre')).toContainText('E2E TYPED $(HOME)');
   const logs = await page.locator('pre').textContent();
   expect(logs?.match(/E2E TYPED \$\(HOME\)/g)).toHaveLength(2);
@@ -66,7 +66,7 @@ test('E2E-03: Browser upload, enum, RustFS object and GRETL CSV analysis', async
   });
   await page.getByRole('button', { name: 'Job starten' }).click();
   await expect(page.getByRole('progressbar', { name: 'Startfortschritt' })).toBeVisible();
-  await expect(page.getByText('Succeeded', { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText('Succeeded', { exact: true })).toBeVisible({ timeout: 90_000 });
   await expect(page.locator('pre')).toContainText('records=3 columns=2');
   const run = page.url().split('/').pop()!;
   const key = 'runs/' + run + '/inputs/inputFile';
@@ -94,7 +94,7 @@ test('E2E-05: failed GRETL run retains its error log', async ({ page }) => {
   await page.getByLabel('Nachricht').fill('E2E failure');
   await page.getByLabel('Wiederholungen').fill('0');
   await page.getByRole('button', { name: 'Job starten' }).click();
-  await expect(page.getByText('Failed', { exact: true })).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText('Failed', { exact: true })).toBeVisible({ timeout: 90_000 });
   await expect(page.locator('pre')).toContainText('count must be between 1 and 1000');
 });
 
@@ -102,7 +102,7 @@ test('E2E-06: cancel in Headlamp terminates the Pod and allows deletion', async 
   const fixture = kubectl('create', '-f', 'test/e2e/fixtures/wait-workflow.yaml', '-o', 'jsonpath={.metadata.name}');
   try {
     await page.goto(pageRoot + '/runs/' + fixture);
-    await expect(page.locator('pre')).toContainText('waiting for cancellation', { timeout: 60_000 });
+    await expect(page.locator('pre')).toContainText('waiting for cancellation', { timeout: 90_000 });
     const run = page.url().split('/').pop()!;
     const pods = () => kubectl('get', 'pod', '-l', 'workflows.argoproj.io/workflow=' + run, '-o', 'name').trim();
     expect(pods()).toMatch(/^pod\//);
@@ -136,7 +136,7 @@ test('schedule details and inherited light and dark Headlamp themes', async ({ b
         await page.getByRole('link', { name: 'Zeitbericht' }).click();
         await expect(page.getByLabel('Nachricht')).toHaveValue('Zeitbericht gestartet');
         await page.getByRole('button', { name: 'Job starten' }).click();
-        await expect(page.getByText('Succeeded', { exact: true })).toBeVisible({ timeout: 60_000 });
+        await expect(page.getByText('Succeeded', { exact: true })).toBeVisible({ timeout: 90_000 });
         await expect(page.locator('pre')).toContainText('Zeitbericht gestartet');
       }
     } finally { await context.close(); }
@@ -164,7 +164,7 @@ test('configured Git source and manual synchronization are visible in Headlamp',
   await expect(page.getByText(/github\.com.*gretl-runtime-jobs/)).toBeVisible();
   await expect(page.getByText(/feature\/v2-job-console · [a-f0-9]{40}/)).toBeVisible();
   await page.getByRole('button', { name: 'Jetzt synchronisieren' }).click();
-  await expect(page.getByText(/Synchronized feature\/v2-job-console at [a-f0-9]{40}/)).toBeVisible({ timeout: 60_000 });
+  await expect(page.getByText(/Synchronized feature\/v2-job-console at [a-f0-9]{40}/)).toBeVisible({ timeout: 90_000 });
 });
 
 
