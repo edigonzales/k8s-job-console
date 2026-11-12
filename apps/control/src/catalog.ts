@@ -60,7 +60,10 @@ export function resolveCron(id: string, expression: string, timeZone: string) {
   if (resolved.some((field, index) => {
     const normalized = index === 3 ? field.replace(/JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC/gi, '1')
       : index === 4 ? field.replace(/SUN|MON|TUE|WED|THU|FRI|SAT/gi, '1') : field;
-    return !/^(?:\*|\?|\d+(?:-\d+)?)(?:\/\d+)?(?:,(?:\*|\?|\d+(?:-\d+)?)(?:\/\d+)?)*$/.test(normalized);
+    if (!/^(?:\*|\?|\d+(?:-\d+)?)(?:\/\d+)?(?:,(?:\*|\?|\d+(?:-\d+)?)(?:\/\d+)?)*$/.test(normalized)) return true;
+    // cron-parser also accepts Sunday as 7. Kubernetes requires 0 or SUN.
+    return index === 4 && normalized.split(',').some(item =>
+      item.split('/')[0].split('-').some(value => Number(value) > 6));
   })) throw new Error('Unsupported Kubernetes cron syntax');
   const cron = resolved.join(' ');
   CronExpressionParser.parse(cron.replaceAll('?', '*'), { tz: timeZone });
@@ -121,5 +124,6 @@ export function validateValues(job: Job, input: unknown, files = new Set<string>
     if (!validValue(p, value)) throw new Error(`Missing or invalid parameter: ${p.name}`);
     result[p.name] = value as Values[string];
   }
+  if (Buffer.byteLength(JSON.stringify(result)) > 128 * 1024) throw new Error('Total parameter size exceeds 128 KiB');
   return result;
 }

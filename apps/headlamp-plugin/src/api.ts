@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 export type Value = string | number | boolean;
 export interface Parameter {
   name: string;
@@ -38,7 +40,8 @@ export interface Run {
   scheduled: boolean;
 }
 
-const prefix = '/job-console-api/api';
+const apiBase = import.meta.env.VITE_JOB_CONSOLE_API?.replace(/\/+$/, '') || '/job-console-api';
+const prefix = apiBase + '/api';
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(prefix + path, { cache: 'no-store', ...options });
   if (response.status === 204) return undefined as T;

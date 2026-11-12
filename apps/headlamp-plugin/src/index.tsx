@@ -125,6 +125,7 @@ function JobForm({ job }: { job: JobDetail }) {
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const controller = useRef<AbortController>();
+  const uploading = busy && Object.values(files).some(Boolean) && (progress ?? 0) < 100;
   useEffect(() => () => controller.current?.abort(), []);
 
   async function submit(event: FormEvent) {
@@ -145,7 +146,7 @@ function JobForm({ job }: { job: JobDetail }) {
         } else if (p.required) nextErrors[p.name] = 'Wähle eine Datei aus.';
         continue;
       }
-      if (value === undefined || (value === '' && p.type !== 'enum')) {
+      if (value === undefined || (value === '' && !['enum', 'text', 'multiline'].includes(p.type))) {
         if (p.required) nextErrors[p.name] = 'Gib einen Wert ein.';
         continue;
       }
@@ -186,12 +187,12 @@ function JobForm({ job }: { job: JobDetail }) {
         onFile={file => setFiles(previous => ({ ...previous, [p.name]: file }))} />)}</Stack>
     </Box>
     {busy && <Stack spacing={1}>
-      <Typography variant="body2">{progress === null || progress >= 100 ? 'Job wird gestartet' : `Upload ${Math.floor(progress)} %`}</Typography>
+      <Typography variant="body2">{uploading ? progress === null ? 'Upload läuft' : `Upload ${Math.floor(progress)} %` : 'Job wird gestartet'}</Typography>
       <LinearProgress aria-label="Startfortschritt" variant={progress === null || progress >= 100 ? 'indeterminate' : 'determinate'} value={progress ?? 0} />
     </Stack>}
     <Stack direction="row" spacing={1}>
       <Button variant="contained" type="submit" disabled={busy}>Job starten</Button>
-      {busy && progress !== null && progress < 100 && <Button onClick={() => controller.current?.abort()}>Upload abbrechen</Button>}
+      {uploading && <Button onClick={() => controller.current?.abort()}>Upload abbrechen</Button>}
     </Stack>
   </Stack>;
 }
@@ -237,6 +238,7 @@ function Runs() {
 }
 
 function RunDetails() {
+  const history = useHistory();
   const { name } = useParams<{ name: string }>();
   const path = '/runs/' + encodeURIComponent(name ?? '');
   const run = useApi<Run>(path, 3000);
@@ -244,11 +246,19 @@ function RunDetails() {
   const jobs = useApi<Job[]>('/jobs');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  async function cancel() {
+  async function updateRun(action: 'cancel' | 'delete') {
     if (busy) return;
     setBusy(true);
     setError('');
-    try { await api(path + '/cancel', { method: 'POST' }); run.refresh(); }
+    try {
+      if (action === 'cancel') {
+        await api(path + '/cancel', { method: 'POST' });
+        run.refresh();
+      } else {
+        await api(path, { method: 'DELETE' });
+        history.push(root + '/runs');
+      }
+    }
     catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   }
@@ -262,7 +272,9 @@ function RunDetails() {
     {error && <Alert severity="error">{error}</Alert>}
     <Stack direction="row" spacing={1}>
       <Button variant="outlined" onClick={() => { run.refresh(); logs.refresh(); }}>Aktualisieren</Button>
-      {active(data) && <Button variant="outlined" color="warning" disabled={busy} onClick={cancel}>Abbrechen</Button>}
+      {active(data)
+        ? <Button variant="outlined" color="warning" disabled={busy} onClick={() => updateRun('cancel')}>Abbrechen</Button>
+        : <Button variant="outlined" color="error" disabled={busy} onClick={() => updateRun('delete')}>Löschen</Button>}
     </Stack>
     {Object.keys(data.parameters).length > 0 && <Box component="dl" sx={{ m: 0, overflowWrap: 'anywhere' }}>
       {Object.entries(data.parameters).map(([key, value]) => <React.Fragment key={key}>
@@ -308,4 +320,4 @@ for (const [path, item, component] of [
 }
 registerSidebarEntryFilter(() => null);
 registerHomeSidebarEntryFilter(entry => entry.name.startsWith('job-console-') || entry.name === 'settings' ? entry : null);
-registerRouteFilter(route => route.name?.startsWith('job-console-') || route.path.startsWith('/settings') ? route : null);
+registerRouteFilter(route => route.name?.startsWith('job-console-') || (route.path.startsWith('/settings') || route.path === '*') ? route : null);

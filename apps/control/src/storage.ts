@@ -16,14 +16,14 @@ export function storage() {
   const client = new S3Client({
     endpoint: process.env.S3_ENDPOINT, region: process.env.AWS_REGION ?? 'us-east-1',
     forcePathStyle: process.env.S3_PATH_STYLE !== 'false',
+    requestHandler: {
+      connectionTimeout: Number(process.env.S3_CONNECT_TIMEOUT_MS ?? 5000),
+      socketTimeout: Number(process.env.S3_SOCKET_TIMEOUT_MS ?? 30000),
+    },
     requestChecksumCalculation: 'WHEN_REQUIRED', responseChecksumValidation: 'WHEN_REQUIRED',
   });
   return {
     async upload(name: string, field: string, source: Readable, count: (bytes: number) => void, signal: AbortSignal) {
-      const controller = new AbortController();
-      const abort = () => controller.abort();
-      signal.addEventListener('abort', abort, { once: true });
-      if (signal.aborted) abort();
       const meter = new Transform({
         transform(chunk: Buffer, _encoding, callback) {
           try { count(chunk.length); callback(null, chunk); }
@@ -32,17 +32,13 @@ export function storage() {
       });
       const upload = new Upload({
         client, params: { Bucket: bucket, Key: key(name, field), Body: meter },
-        partSize: 8 * MiB, queueSize: 1, abortController: controller,
+        partSize: 5 * MiB, queueSize: 1,
       });
       const sending = upload.done().catch(error => { meter.destroy(error as Error); throw error; });
-      const reading = pipeline(source, meter, { signal: controller.signal })
-        .catch(error => { abort(); throw error; });
-      try {
-        const results = await Promise.allSettled([reading, sending]);
-        for (const result of results) if (result.status === 'rejected') throw result.reason;
-      } finally {
-        signal.removeEventListener('abort', abort);
-      }
+      // Destroying the stream makes the SDK abort its multipart upload and
+      // settle after cleanup, even when an S3 request was already in flight.
+      const results = await Promise.allSettled([pipeline(source, meter, { signal }), sending]);
+      for (const result of results) if (result.status === 'rejected') throw result.reason;
     },
     async remove(name: string, field: string) {
       await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key(name, field) }));

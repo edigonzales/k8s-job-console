@@ -42,7 +42,12 @@ test('E2E-03: Browser upload, enum, RustFS object and GRETL CSV analysis', async
   await page.getByRole('combobox', { name: 'Trennzeichen' }).click();
   await expect(page.getByRole('option', { name: 'Tabulator' })).toBeVisible();
   await page.getByRole('option', { name: 'Komma' }).click();
+  const network = await page.context().newCDPSession(page);
+  await network.send('Network.emulateNetworkConditions', {
+    offline: false, latency: 400, downloadThroughput: -1, uploadThroughput: -1,
+  });
   await page.getByRole('button', { name: 'Job starten' }).click();
+  await expect(page.getByRole('progressbar', { name: 'Startfortschritt' })).toBeVisible();
   await expect(page.getByText('Succeeded', { exact: true })).toBeVisible({ timeout: 60_000 });
   await expect(page.locator('pre')).toContainText('records=3 columns=2');
   const run = page.url().split('/').pop()!;
@@ -68,7 +73,7 @@ test('E2E-05: failed GRETL run retains its error log', async ({ page }) => {
   await expect(page.locator('pre')).toContainText('count must be between 1 and 1000');
 });
 
-test('E2E-06: cancel in Headlamp suspends the Job and terminates its Pod', async ({ page, request }) => {
+test('E2E-06: cancel in Headlamp terminates the Pod and allows deletion', async ({ page, request }) => {
   await page.goto(pageRoot + '/jobs/console-test-wait');
   await page.getByRole('button', { name: 'Job starten' }).click();
   await expect(page.locator('pre')).toContainText('waiting for cancellation', { timeout: 60_000 });
@@ -77,10 +82,15 @@ test('E2E-06: cancel in Headlamp suspends the Job and terminates its Pod', async
   expect(pods()).toMatch(/^pod\//);
   await page.getByRole('button', { name: 'Abbrechen', exact: true }).click();
   await expect(page.getByText('Canceled', { exact: true })).toBeVisible();
-  expect(kubectl('get', 'job', run, '-o', 'jsonpath={.spec.suspend}')).toBe('true');
-  await expect.poll(pods, { timeout: 30_000 }).toBe('');
+  expect(kubectl('get', 'job', run, '-o', 'jsonpath={.spec.parallelism}')).toBe('0');
+  await expect.poll(() => kubectl('get', 'job', run, '-o',
+    'jsonpath={.status.conditions[?(@.type=="Failed")].reason}'), { timeout: 30_000 }).toBe('DeadlineExceeded');
+  expect(kubectl('get', 'pod', '-l', 'job-name=' + run, '-o', 'jsonpath={.items[*].status.phase}'))
+    .not.toMatch(/Running|Pending/);
   expect((await (await request.get(apiRoot + '/runs/' + run)).json()).status).toBe('Canceled');
-  expect((await request.delete(apiRoot + '/runs/' + run)).status()).toBe(204);
+  await page.getByRole('button', { name: 'Löschen', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Ausführungen' })).toBeVisible();
+  expect((await request.get(apiRoot + '/runs/' + run)).status()).toBe(404);
 });
 
 test('schedule details and inherited light and dark Headlamp themes', async ({ browser }) => {
@@ -94,7 +104,27 @@ test('schedule details and inherited light and dark Headlamp themes', async ({ b
       await expect(page.getByRole('cell', { name: 'Europe/Zurich' })).toBeVisible();
       await expect(page.getByRole('cell', { name: 'H H(1-3) * * *' })).toBeVisible();
       colors.push(await page.locator('body').evaluate(el => getComputedStyle(el).backgroundColor));
+      if (mode === 'light') {
+        await page.getByRole('link', { name: 'Zeitbericht' }).click();
+        await expect(page.getByLabel('Nachricht')).toHaveValue('Zeitbericht gestartet');
+        await page.getByRole('button', { name: 'Job starten' }).click();
+        await expect(page.getByText('Succeeded', { exact: true })).toBeVisible({ timeout: 60_000 });
+        await expect(page.locator('pre')).toContainText('Zeitbericht gestartet');
+      }
     } finally { await context.close(); }
   }
   expect(colors[0]).not.toBe(colors[1]);
+});
+
+test('cross-origin browser requests are denied in local mode', async ({ page, request }) => {
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Jobs', exact: true })).toBeVisible();
+  const target = 'http://localhost:4466' + apiRoot + '/jobs';
+  const result = await page.evaluate(url => fetch(url).then(() => 'allowed', () => 'blocked'), target);
+  expect(result).toBe('blocked');
+  const response = await request.get(target, {
+    headers: { Origin: 'http://127.0.0.1:4466', 'Sec-Fetch-Site': 'cross-site' },
+  });
+  expect(response.status()).toBe(403);
+  expect(response.headers()['access-control-allow-origin']).toBeUndefined();
 });

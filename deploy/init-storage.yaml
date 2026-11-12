@@ -2,6 +2,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   generateName: init-storage-
+  labels: {app: job-console-init-storage}
 spec:
   ttlSecondsAfterFinished: 300
   activeDeadlineSeconds: 90

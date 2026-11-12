@@ -55,8 +55,11 @@ test('cron resolves deterministic offsets and accepts Kubernetes grammar', () =>
   assert.equal(cron('hello', 'H * * * *'), cron('hello', 'H * * * *'));
   assert.ok(new Set(['a', 'b', 'c'].map(id => cron(id, 'H * * * *'))).size > 1);
   assert.equal(cron('hello', '30 2 * JAN MON-FRI'), '30 2 * JAN MON-FRI');
+  assert.equal(cron('hello', '0 0 * * SUN'), '0 0 * * SUN');
+  assert.equal(cron('hello', '0 0 * * */7'), '0 0 * * */7');
   for (const invalid of ['H(60-61) * * * *', 'H(9-1) * * * *', 'H/0 * * * *', '* * H * *',
-    'H,H * * * *', '* * L * *', '60 0 * * *', '@hourly', '5 * * *']) assert.throws(() => cron('hello', invalid));
+    'H,H * * * *', '* * L * *', '60 0 * * *', '@hourly', '5 * * *',
+    '0 0 * * 7', '0 0 * * 1-7', '0 0 * * 6-7', '0 0 * * 0,7']) assert.throws(() => cron('hello', invalid));
 });
 
 test('manifests use a shared restricted pod template and literal arguments', () => {
@@ -97,6 +100,9 @@ test('generator writes deterministic manifests and rejects symlink scripts', asy
 test('HTTP validation, upload limits, namespace isolation and cancellation', async t => {
   const created: V1Job[] = [];
   const deleted: string[] = [];
+  let createFailure: number | undefined;
+  let uploadFailure = false;
+  let cleanupFailure = false;
   const managed = manualJob(job, 'hello-existing', { message: 'x' }, []);
   managed.metadata!.resourceVersion = '10';
   managed.metadata!.uid = 'managed-uid';
@@ -104,6 +110,7 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
   const batch = {
     createNamespacedJob: async ({ namespace, body }: { namespace: string; body: V1Job }) => {
       assert.equal(namespace, 'job-console');
+      if (createFailure) throw Object.assign(new Error('sensitive Kubernetes error'), { code: createFailure });
       created.push(body);
       return body;
     },
@@ -113,7 +120,8 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
     patchNamespacedJob: async ({ body }: { body: { value: unknown }[] }) => {
       assert.equal(body[0].value, '10');
       managed.metadata!.annotations = body[1].value as Record<string, string>;
-      managed.spec!.suspend = body[2].value as boolean;
+      managed.spec!.parallelism = body[2].value as number;
+      managed.spec!.activeDeadlineSeconds = body[3].value as number;
       return managed;
     },
     deleteNamespacedJob: async () => ({}),
@@ -124,8 +132,12 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
       assert.match(name, /^files-[a-f0-9]{12}$/);
       assert.ok(['file', 'other'].includes(field));
       for await (const chunk of source) count(chunk.length);
+      if (uploadFailure) throw new Error('sensitive S3 error');
     },
-    remove: async (_name, field) => { deleted.push(field); },
+    remove: async (_name, field) => {
+      deleted.push(field);
+      if (cleanupFailure) throw new Error('sensitive cleanup error');
+    },
   };
   const app = await buildApp([job, fileJob], batch, core, 'job-console', s3, { file: 12, total: 15 });
   t.after(() => app.close());
@@ -150,11 +162,38 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
   assert.equal((await upload([['file', 'a.csv', 'a'.repeat(9)], ['other', 'b.csv', 'b'.repeat(9)]])).statusCode, 413);
   assert.deepEqual(deleted, ['file', 'file', 'other']);
   assert.deepEqual(created[0].metadata?.labels, labels('hello'));
+
+  uploadFailure = true;
+  cleanupFailure = true;
+  let failure = await upload([['file', 'yes.csv', '1,2']]);
+  assert.equal(failure.statusCode, 502);
+  assert.deepEqual(failure.json(), { error: 'Kubernetes or object storage operation failed' });
+  assert.equal(created.length, 2);
+  assert.equal(deleted.length, 4);
+  uploadFailure = false;
+  cleanupFailure = false;
+  createFailure = 422;
+  failure = await upload([['file', 'yes.csv', '1,2']]);
+  assert.equal(failure.statusCode, 502);
+  assert.equal(deleted.length, 5);
+  createFailure = 500;
+  failure = await upload([['file', 'yes.csv', '1,2']]);
+  assert.equal(failure.statusCode, 502);
+  assert.equal(deleted.length, 5, 'retain inputs when the create result is ambiguous');
+  assert.equal(created.length, 2);
   assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/other' })).statusCode, 404);
   assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/hello-existing' })).statusCode, 409);
   assert.equal((await app.inject({ method: 'POST', url: '/api/runs/hello-existing/cancel' })).json().status, 'Canceled');
-  assert.equal(managed.spec?.suspend, true);
+  assert.equal(managed.spec?.parallelism, 0);
+  assert.equal(managed.spec?.activeDeadlineSeconds, 1);
   assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/hello-existing' })).statusCode, 204);
+});
+
+test('aggregate parameter values stay within the annotation and command budget', () => {
+  const parameters = Array.from({ length: 32 }, (_, i) => ({ name: 'p' + i, label: 'Text', type: 'text' }));
+  const largeJob = parseJob({ ...base, parameters });
+  const values = Object.fromEntries(parameters.map(p => [p.name, 'ä'.repeat(4096)]));
+  assert.throws(() => validateValues(largeJob, values), /Total parameter size/);
 });
 
 test('Kubernetes failure and waiting reasons surface', () => {

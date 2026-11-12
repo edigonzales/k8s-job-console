@@ -64,14 +64,16 @@ spec:
             capabilities: {drop: [ALL]}
           env:
             - {name: LOCAL_UNAUTHENTICATED, value: "true"}
+            - {name: GRETL_IMAGE, value: "job-console-gretl:local"}
+            - {name: CONTROL_IMAGE, value: "job-console-control:local"}
             - name: NAMESPACE
               valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
           envFrom:
             - configMapRef: {name: job-console-storage}
             - secretRef: {name: job-console-storage}
           resources:
-            requests: {memory: 96Mi, cpu: 100m}
-            limits: {memory: 192Mi, cpu: "1"}
+            requests: {memory: 128Mi, cpu: 100m}
+            limits: {memory: 256Mi, cpu: "1"}
           readinessProbe:
             httpGet: {path: /healthz, port: 8080}
             periodSeconds: 2

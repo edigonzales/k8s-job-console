@@ -7,3 +7,6 @@ if [[ $(kubectl config current-context) != rancher-desktop ]]; then
   exit 1
 fi
 k() { kubectl --context rancher-desktop --namespace job-console "$@"; }
+namespace_owner() {
+  k get namespace job-console --ignore-not-found -o jsonpath='{.metadata.name}/{.metadata.labels.app\.kubernetes\.io/managed-by}'
+}

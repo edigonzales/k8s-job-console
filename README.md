@@ -26,16 +26,21 @@ Grossschreibung. Für **CSV analysieren** verwende `testdata/sample.csv` aus dem
 Job-Repository. **Zeitbericht** kann manuell gestartet werden und erscheint
 unter **Zeitpläne**. Das Design folgt dem Headlamp-Theme.
 
-Headlamp v0.46.0 und Launcher sind über einen Loopback-Port-Forward und
-denselben Browser-Origin erreichbar. Der Reverse Proxy leitet
-`/job-console-api/` an den internen Launcher weiter. Beide Dienste verwenden
-ClusterIP. Der Launcher ist ausdrücklich für lokalen Einzelbenutzerbetrieb
-konfiguriert. Für Mehrbenutzerbetrieb sind Authentisierung, Autorisierung,
+Headlamp v0.46.0 und der Reverse Proxy lauschen auf Loopback im Pod. Der
+lokale Port-Forward macht beides unter einem Browser-Origin erreichbar.
+Der Proxy leitet `/job-console-api/` an den Launcher mit ClusterIP weiter.
+Die Plugin-Adresse lässt sich beim Build mit
+`VITE_JOB_CONSOLE_API=/anderer-proxy-pfad npm run plugin` konfigurieren.
+Passe dazu den Proxy-Pfad an. Im lokalen Modus bleiben Browser-Anfragen
+über einen anderen Origin gesperrt. Der Launcher ist ausdrücklich für
+lokalen Einzelbenutzerbetrieb konfiguriert. Für Mehrbenutzerbetrieb sind Authentisierung, Autorisierung,
 TLS und eine geeignete Secret-Verwaltung erforderlich.
 
 `dev-up.sh` baut bei Bedarf das generische GRETL-Image mit der Buildroutine des
 Runtime-Repositorys. Für einen beabsichtigten Neubau entferne den lokalen Tag
-`job-console-gretl:local` vor dem nächsten Start. `dev-down.sh` entfernt die
+`job-console-gretl:local` vor dem nächsten Start. Die Deployment- und Generator-
+Vorgaben verwenden `job-console-gretl:local` und `job-console-control:local`.
+`dev-down.sh` entfernt die
 Anwendung und behält den RustFS-Datenträger. `dev-down.sh --purge-storage`
 entfernt den reservierten Namespace samt Daten.
 
@@ -56,8 +61,9 @@ in Minuten und Stunden. Kubernetes interpretiert den Zeitplan in der
 angegebenen Zeitzone. Bei Zeitumstellungen können lokale Uhrzeiten ausfallen
 oder wiederholt auftreten.
 
-Die Job-Definition ist auf 32 Parameter begrenzt. Pro Upload sind maximal
-512 MiB pro Datei und 1 GiB Nutzdaten pro Ausführung zulässig. RustFS bewahrt
+Eine Definition unterstützt bis zu 32 Parameter. Serialisierte Parameterwerte
+dürfen zusammen 128 KiB belegen. Der Launcher verarbeitet jeweils einen
+Dateiupload mit maximal 512 MiB pro Datei und 1 GiB pro Ausführung. RustFS bewahrt
 Objekte standardmässig sieben Tage auf. Die Grenze lässt sich über
 `S3_RETENTION_DAYS` beim Initialisieren des Buckets konfigurieren. Die übrigen
 S3-Einstellungen stehen in `deploy/storage.yaml`, Zugangsdaten im Kubernetes
@@ -65,9 +71,11 @@ Secret. Job-Pods mounten die Eingaben read-only. Die Scripts stammen aus dem
 vertrauenswürdigen Job-Repository und sind ausführbarer Code.
 
 Abgeschlossene Jobs haben sieben Tage TTL. CronJobs bewahren bis zu drei
-erfolgreiche und zwei fehlgeschlagene Ausführungen auf. Ein Abbruch suspendiert
-den Job, damit Kubernetes den Pod beendet und keine weiteren Pods startet.
-Abgebrochene Jobs bleiben über die API abrufbar, bis sie gelöscht werden.
+erfolgreiche und zwei fehlgeschlagene Ausführungen auf. Beim Abbruch setzt der
+Launcher die Parallelität auf null und verkürzt die Kubernetes-Job-Frist.
+Kubernetes beendet den Pod, schliesst den Job ab und kann danach den nächsten
+CronJob-Lauf starten. Die Oberfläche zeigt den abgebrochenen Lauf als
+`Canceled`. Abgeschlossene Läufe können über **Löschen** entfernt werden.
 Pod-Logs sind verfügbar, solange Kubernetes den Pod aufbewahrt.
 
 ## Tests und Fehlerdiagnose

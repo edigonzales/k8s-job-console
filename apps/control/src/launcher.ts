@@ -65,6 +65,7 @@ export async function buildApp(catalog: Job[], batch: BatchV1Api, core: CoreV1Ap
     request.log.error({ kind: (error as Error).name, code: kubeCode(error) }, 'Backend operation failed');
     return reply.code(502).send({ error: 'Kubernetes or object storage operation failed' });
   });
+  let uploading = false;
   const findJob = (id: string) => {
     const job = catalog.find(item => item.id === id);
     if (!job) throw missing();
@@ -102,6 +103,8 @@ export async function buildApp(catalog: Job[], batch: BatchV1Api, core: CoreV1Ap
 
   app.post<{ Params: { id: string } }>('/api/jobs/:id/runs', async (request, reply) => {
     const job = findJob(request.params.id);
+    const hasUpload = request.isMultipart();
+    if (hasUpload && uploading) throw new HttpError(429, 'Another upload is in progress');
     const name = `${job.id}-${randomBytes(6).toString('hex')}`;
     const files = new Set<string>();
     const attempted = new Set<string>();
@@ -111,8 +114,9 @@ export async function buildApp(catalog: Job[], batch: BatchV1Api, core: CoreV1Ap
     const disconnected = () => controller.abort();
     request.raw.once('aborted', disconnected);
     reply.raw.once('close', disconnected);
+    if (hasUpload) uploading = true;
     try {
-      if (request.isMultipart()) {
+      if (hasUpload) {
         let total = 0;
         let hasParameters = false;
         for await (const part of request.parts()) {
@@ -170,6 +174,7 @@ export async function buildApp(catalog: Job[], batch: BatchV1Api, core: CoreV1Ap
       }
       throw error;
     } finally {
+      if (hasUpload) uploading = false;
       request.raw.off('aborted', disconnected);
       reply.raw.off('close', disconnected);
     }
@@ -219,7 +224,10 @@ export async function buildApp(catalog: Job[], batch: BatchV1Api, core: CoreV1Ap
       const patched = await batch.patchNamespacedJob({ namespace, name, body: [
         { op: 'test', path: '/metadata/resourceVersion', value: job.metadata?.resourceVersion },
         { op: 'add', path: '/metadata/annotations', value: { ...job.metadata?.annotations, [canceled]: new Date().toISOString() } },
-        { op: 'add', path: '/spec/suspend', value: true },
+        // Let the Job controller terminate the run, release a CronJob's
+        // Forbid slot and start TTL cleanup. Zero parallelism prevents new pods.
+        { op: 'add', path: '/spec/parallelism', value: 0 },
+        { op: 'add', path: '/spec/activeDeadlineSeconds', value: 1 },
       ] });
       return summary(patched);
     } catch (error) {
