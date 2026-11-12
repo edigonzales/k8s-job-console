@@ -16,13 +16,14 @@ const active = (run: Run) => ['Pending', 'Queued', 'Running', 'AwaitingInput', '
 const jobLink = (id: string) => root + '/jobs/' + id;
 const runLink = (name: string) => root + '/runs/' + name;
 
-function useApi<T>(path: string, interval?: number) {
-  const [state, setState] = useState<{ path: string; data?: T; error?: string }>({ path });
+function useApi<T>(path?: string, interval?: number) {
+  const [state, setState] = useState<{ path?: string; data?: T; error?: string }>({ path });
   const [revision, setRevision] = useState(0);
   useEffect(() => {
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout>;
     async function load() {
+      if (!path) return;
       try {
         const data = await api<T>(path, { signal: controller.signal });
         if (!controller.signal.aborted) setState({ path, data });
@@ -375,7 +376,7 @@ function Synchronizations() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [selected, setSelected] = useState('');
-  const details = useApi<{ logs?: string }>(selected ? '/synchronizations/' + selected : '/healthz', selected ? 4000 : undefined);
+  const details = useApi<{ logs?: string }>(selected ? '/synchronizations/' + selected : undefined, selected ? 4000 : undefined);
   async function start(branch?: string) {
     setError('');
     setBusy(true);

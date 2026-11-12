@@ -6,7 +6,7 @@ import { CoreV1Api, CustomObjectsApi, KubeConfig, V1Pod } from '@kubernetes/clie
 import { validateValues } from './catalog.js';
 import { argoClient, type Artifact, type Workflow } from './argo.js';
 import { jobIdLabel, managedBy, workflow, parametersAnnotation, revisionAnnotation, imageAnnotation,
-  outputLabelsAnnotation, triggerAnnotation, selector, templateName, type CatalogJob } from './workflows.js';
+  outputLabelsAnnotation, triggerAnnotation, selector, templateName, type CatalogJob, type Source } from './workflows.js';
 import { sync } from './sync.js';
 import { authenticator, can, isAdmin, principalId, type Action, type Principal } from './identity.js';
 import { type Values } from './catalog.js';
@@ -60,18 +60,17 @@ function summary(run: Workflow, candidates: V1Pod[] = []) {
 }
 
 export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<CatalogJob[]>), argo: ReturnType<typeof argoClient>, core: CoreV1Api,
-  custom: CustomObjectsApi, namespace: string,
+  custom: CustomObjectsApi, namespace: string, authenticate: ReturnType<typeof authenticator>,
   s3: Pick<ReturnType<typeof storage>, 'upload' | 'remove' | 'download' | 'stat'> = storage(),
-  limits = { file: fileLimit, total: totalLimit },
-  authenticate?: ReturnType<typeof authenticator>) {
+  limits = { file: fileLimit, total: totalLimit }) {
   const app = Fastify({ logger: { level: process.env.LOG_LEVEL ?? 'info' }, bodyLimit: 256 * 1024 });
   await app.register(multipart, { limits: { fileSize: limits.file, fieldSize: 256 * 1024, parts: 33, headerPairs: 32 } });
   const principals = new WeakMap<FastifyRequest, Principal>();
   const principal = (request: FastifyRequest) => principals.get(request);
   const permitted = (request: FastifyRequest, action: Action, job?: CatalogJob) => {
     const user = principal(request);
-    return !user || (job ? can(user, action, job.access) :
-      isAdmin(user) && (action === 'view' || action === 'manage'));
+    return Boolean(user && (job ? can(user, action, job.access) :
+      isAdmin(user) && (action === 'view' || action === 'manage')));
   };
   const assertAction = (request: FastifyRequest, action: Action, job?: CatalogJob) => {
     if (!permitted(request, 'view', job)) throw missing();
@@ -79,18 +78,20 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
   };
   const assertAdmin = (request: FastifyRequest) => {
     const user = principal(request);
-    if (user && !isAdmin(user)) throw forbidden();
+    if (!user || !isAdmin(user)) throw forbidden();
   };
   const actions = (request: FastifyRequest, job: CatalogJob) =>
     (['view', 'run', 'approve', 'manage'] as const).filter(action => permitted(request, action, job));
+  const origins = (process.env.LOCAL_ORIGINS ?? 'http://localhost:4466,http://127.0.0.1:4466')
+    .split(',').map(origin => origin.trim());
   app.addHook('onRequest', async request => {
     const origin = request.headers.origin;
     if (request.headers['sec-fetch-site'] === 'cross-site' ||
-        (authenticate && !['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !origin) ||
-        (origin && !(process.env.LOCAL_ORIGINS ?? 'http://localhost:4466,http://127.0.0.1:4466').split(',').includes(origin))) {
+        (!['GET', 'HEAD', 'OPTIONS'].includes(request.method) && !origin) ||
+        (origin && !origins.includes(origin))) {
       throw new HttpError(403, 'Origin not permitted');
     }
-    if (authenticate && request.url !== '/healthz') {
+    if (request.url !== '/healthz') {
       try { principals.set(request, await authenticate(request)); }
       catch { throw new HttpError(401, 'Sign in to continue'); }
     }
@@ -155,6 +156,7 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
     return argo.create({ ...run, spec: template });
   }
 
+  const publicSource = ({ gitSecret: _secret, ...source }: Source) => source;
   const syncLabel = 'job-console.io/sync';
   const syncRef = process.env.JOBS_REF ?? 'main';
   const previewEnabled = process.env.ALLOW_PREVIEW === 'true' && process.env.OIDC_DEV_MODE === 'true';
@@ -171,7 +173,7 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
       repository: process.env.JOBS_REPOSITORY,
       defaultRef: syncRef,
       previewEnabled,
-      active: jobs[0]?.source,
+      active: jobs[0] && publicSource(jobs[0].source),
       runs: (result.items ?? []).filter(run => run.metadata.labels?.[syncLabel] === 'true').map(syncInfo)
         .sort((a, b) => new Date(b.created ?? 0).getTime() - new Date(a.created ?? 0).getTime()),
     };
@@ -218,14 +220,14 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
   app.get('/api/jobs', async request => (await catalog()).filter(job => job.exposed && permitted(request, 'view', job))
     .map(job => {
       const { id, name, description, runtime, source, parameters, schedule, resolvedCron } = job;
-      return { id, name, description, runtime, kind: 'job', source, preview: Boolean(source.ref && source.ref !== syncRef), parameters, schedule, resolvedCron,
+      return { id, name, description, runtime, kind: 'job', source: publicSource(source), preview: Boolean(source.ref && source.ref !== syncRef), parameters, schedule, resolvedCron,
         allowed: actions(request, job) };
     }));
   app.get<{ Params: { id: string } }>('/api/jobs/:id', async request => {
     const job = await findJob(request.params.id);
     assertAction(request, 'view', job);
     const { script: _script, resources: _resources, access: _access, ...details } = job;
-    return { ...details, preview: Boolean(job.source.ref && job.source.ref !== syncRef), allowed: actions(request, job) };
+    return { ...details, source: publicSource(job.source), preview: Boolean(job.source.ref && job.source.ref !== syncRef), allowed: actions(request, job) };
   });
   app.get('/api/schedules', async request => {
     const schedules = await custom.listNamespacedCustomObject({
@@ -331,11 +333,9 @@ export async function buildApp(catalogSource: CatalogJob[] | (() => Promise<Cata
       try { values = validateValues(job, input, files); }
       catch (error) { throw bad((error as Error).message); }
       if (controller.signal.aborted) throw bad('Upload interrupted');
-      if (authenticate) {
-        try { principals.set(request, await authenticate(request)); }
-        catch { throw new HttpError(401, 'Sign in to continue'); }
-        assertAction(request, 'run', await findJob(job.id));
-      }
+      try { principals.set(request, await authenticate(request)); }
+      catch { throw new HttpError(401, 'Sign in to continue'); }
+      assertAction(request, 'run', await findJob(job.id));
       creating = true;
       const created = await createRun(request, job, name, values, [...files], template);
       return reply.code(201).send(summary(created));
@@ -489,7 +489,7 @@ async function main() {
   const endpoint = process.env.ARGO_ENDPOINT;
   if (!endpoint) throw new Error('ARGO_ENDPOINT is required');
   const app = await buildApp(catalog, argoClient(endpoint, namespace), core,
-    config.makeApiClient(CustomObjectsApi), namespace, undefined, undefined, authenticate);
+    config.makeApiClient(CustomObjectsApi), namespace, authenticate);
   await app.listen({ host: '0.0.0.0', port: 8080 });
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => void app.close());
 }

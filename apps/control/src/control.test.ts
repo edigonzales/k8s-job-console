@@ -13,6 +13,10 @@ import type { storage } from './storage.js';
 
 const base = {
   id: 'hello', schemaVersion: 2, name: 'Hello', description: 'Example', runtime: 'gretl', script: 'job.groovy',
+  access: {
+    run: { groups: ['test-users'] },
+    manage: { groups: ['test-users'] },
+  },
   parameters: [
     { name: 'message', label: 'Message', type: 'text', required: true },
     { name: 'number', label: 'Number', type: 'integer', default: 1 },
@@ -156,10 +160,14 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
       if (cleanupFailure) throw new Error('sensitive cleanup error');
     },
   };
-  const app = await buildApp([job, fileJob], argo, core, {} as CustomObjectsApi, 'job-console', s3, { file: 12, total: 15 });
+  const origin = 'http://127.0.0.1:4466';
+  const authenticate = async () => ({
+    issuer: 'https://example.org', subject: 'test', displayName: 'Test', groups: ['test-users'],
+  });
+  const app = await buildApp([job, fileJob], argo, core, {} as CustomObjectsApi, 'job-console', authenticate, s3, { file: 12, total: 15 });
   t.after(() => app.close());
-  const send = (id: string, payload: unknown, origin?: string) => app.inject({
-    method: 'POST', url: '/api/jobs/' + id + '/runs', headers: origin ? { origin } : {},
+  const send = (id: string, payload: unknown, requestOrigin = origin) => app.inject({
+    method: 'POST', url: '/api/jobs/' + id + '/runs', headers: { origin: requestOrigin },
     payload: payload as object,
   });
   assert.equal((await send('hello', { parameters: { message: 'Hello' } })).statusCode, 201);
@@ -169,7 +177,7 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
   assert.equal((await send('hello', { parameters: { message: 'x' } }, 'https://example.invalid')).statusCode, 403);
   assert.equal((await send('files', {})).statusCode, 400);
   const upload = (parts: [string, string, string][]) => app.inject({
-    method: 'POST', url: '/api/jobs/files/runs', headers: { 'content-type': 'multipart/form-data; boundary=x' },
+    method: 'POST', url: '/api/jobs/files/runs', headers: { origin, 'content-type': 'multipart/form-data; boundary=x' },
     payload: parts.map(([field, file, value]) =>
       `--x\r\nContent-Disposition: form-data; name="${field}"; filename="${file}"\r\nContent-Type: text/csv\r\n\r\n${value}\r\n`).join('') + '--x--\r\n',
   });
@@ -198,14 +206,14 @@ test('HTTP validation, upload limits, namespace isolation and cancellation', asy
   assert.equal(failure.statusCode, 502);
   assert.equal(deleted.length, 5, 'retain inputs when the create result is ambiguous');
   assert.equal(created.length, 2);
-  assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/other' })).statusCode, 404);
-  assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/hello-existing' })).statusCode, 409);
-  assert.equal((await app.inject({ method: 'POST', url: '/api/runs/hello-existing/cancel' })).json().status, 'Canceling');
+  assert.equal((await app.inject({ method: 'DELETE', headers: { origin }, url: '/api/runs/other' })).statusCode, 404);
+  assert.equal((await app.inject({ method: 'DELETE', headers: { origin }, url: '/api/runs/hello-existing' })).statusCode, 409);
+  assert.equal((await app.inject({ method: 'POST', headers: { origin }, url: '/api/runs/hello-existing/cancel' })).json().status, 'Canceling');
   assert.equal(managed.spec.shutdown, 'Terminate');
-  assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/hello-existing' })).statusCode, 409);
+  assert.equal((await app.inject({ method: 'DELETE', headers: { origin }, url: '/api/runs/hello-existing' })).statusCode, 409);
   managed.status = { phase: 'Failed' };
   assert.equal(runState(managed).status, 'Canceled');
-  assert.equal((await app.inject({ method: 'DELETE', url: '/api/runs/hello-existing' })).statusCode, 204);
+  assert.equal((await app.inject({ method: 'DELETE', headers: { origin }, url: '/api/runs/hello-existing' })).statusCode, 204);
 });
 
 test('aggregate parameter values stay within the annotation and command budget', () => {

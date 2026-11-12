@@ -224,3 +224,10 @@ test('administrator pauses a schedule and the pause survives synchronization and
     await page.request.post(path + '/resume', { headers: origin });
   }
 });
+
+test('an expired browser session returns to the configured OIDC login', async ({ page, context }) => {
+  const cookies = (await context.cookies()).filter(cookie => cookie.name.startsWith('_oauth2_proxy'));
+  expect(cookies.length).toBeGreaterThan(0);
+  await context.addCookies(cookies.map(cookie => ({ ...cookie, expires: Math.floor(Date.now() / 1000) + 1 })));
+  await expect(page.locator('#username')).toBeVisible({ timeout: 30_000 });
+});

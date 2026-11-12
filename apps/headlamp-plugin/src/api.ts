@@ -61,9 +61,18 @@ export interface ResultFile {
 }
 
 export const prefix = apiBase + '/api';
+let signingIn = false;
+function signInAgain(status: number) {
+  if (status !== 401 || signingIn) return;
+  signingIn = true;
+  const target = window.location.pathname + window.location.search;
+  window.location.assign('/oauth2/start?rd=' + encodeURIComponent(target));
+}
+
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(prefix + path, { cache: 'no-store', ...options });
   if (response.status === 204) return undefined as T;
+  signInAgain(response.status);
   const payload = await response.json().catch(() => null);
   if (!response.ok) throw new Error(payload?.error ?? `HTTP ${response.status}`);
   return payload as T;
@@ -84,8 +93,11 @@ export function launch(id: string, revision: string, values: Record<string, Valu
     xhr.setRequestHeader('X-Job-Revision', revision);
     xhr.responseType = 'json';
     xhr.upload.onprogress = event => progress(event.lengthComputable ? 100 * event.loaded / event.total : null);
-    xhr.onload = () => xhr.status === 201
-      ? resolve(xhr.response as Run) : reject(new Error(xhr.response?.error ?? `HTTP ${xhr.status}`));
+    xhr.onload = () => {
+      signInAgain(xhr.status);
+      if (xhr.status === 201) resolve(xhr.response as Run);
+      else reject(new Error(xhr.response?.error ?? `HTTP ${xhr.status}`));
+    };
     xhr.onerror = () => reject(new Error('Verbindung beim Upload unterbrochen'));
     xhr.onabort = () => reject(new Error('Upload abgebrochen'));
     xhr.onloadend = () => signal.removeEventListener('abort', abort);
