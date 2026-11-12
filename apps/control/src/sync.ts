@@ -101,7 +101,8 @@ export async function sync(ref: string) {
       for (const item of existing.items) {
         if (!generated.crons.some(cron => cron.metadata.name === item.metadata.name)) {
           await custom.deleteNamespacedCustomObject({
-            ...crons, name: item.metadata.name, propagationPolicy: 'Orphan', body: { preconditions: { uid: item.metadata.uid } },
+            ...crons, name: item.metadata.name,
+            body: { propagationPolicy: 'Orphan', preconditions: { uid: item.metadata.uid } },
           });
         }
       }
