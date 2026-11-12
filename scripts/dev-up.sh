@@ -5,15 +5,13 @@ for dependency in docker git java node npm openssl python3 jq; do command -v "$d
 [[ $(docker context show) == rancher-desktop ]] || { echo 'Select the rancher-desktop Docker context.' >&2; exit 1; }
 [[ $(node -p 'process.versions.node.split(".")[0]') == 22 ]] || { echo 'Node.js 22 is required.' >&2; exit 1; }
 runtime=$(cd "${GRETL_DIR:-../gretl-runtime}" && pwd)
-if ! docker image inspect job-console-gretl:local >/dev/null 2>&1; then
-  (
-    cd "$runtime"
-    ./mvnw -B -pl gretl-dist -am -DskipTests package
-    "$runtime/scripts/build-runtime-image.sh" --distribution gretl-dist/target/dist \
-      --output "$ROOT/build/runtime-image" --source "$(git rev-parse HEAD)"
-  )
-  docker tag "$(cat build/runtime-image/image-id.txt)" job-console-gretl:local
-fi
+(
+  cd "$runtime"
+  ./mvnw -B -pl gretl-dist -am -DskipTests clean package
+  "$runtime/scripts/build-runtime-image.sh" --distribution gretl-dist/target/dist \
+    --output "$ROOT/build/runtime-image" --source "$(git rev-parse HEAD)"
+)
+docker tag "$(cat build/runtime-image/image-id.txt)" job-console-gretl:local
 npm ci
 npm run build
 docker build -t job-console-control:local -f apps/control/Dockerfile .

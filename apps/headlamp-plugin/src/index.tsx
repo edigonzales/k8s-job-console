@@ -5,7 +5,7 @@ import {
 import {
   registerHomeSidebarEntryFilter, registerRoute, registerRouteFilter, registerSidebarEntry, registerSidebarEntryFilter,
 } from '@kinvolk/headlamp-plugin/lib';
-import React, { type FormEvent, type ReactNode, useEffect, useRef, useState } from 'react';
+import React, { type FormEvent, type ReactNode, useEffect, useId, useRef, useState } from 'react';
 import { Link, useHistory, useParams } from 'react-router-dom';
 import { api, type Job, type JobDetail, launch, type Parameter, type Run, type Schedule, type Value } from './api';
 
@@ -92,18 +92,23 @@ function Field({ field, value, file, onValue, onFile, error }: {
   field: Parameter; value?: Value; file?: File; error?: string;
   onValue: (value: Value) => void; onFile: (file?: File) => void;
 }) {
+  const errorId = useId();
   const label = field.label + (field.required && ['file', 'boolean'].includes(field.type) ? ' *' : '');
   if (field.type === 'boolean') return <FormControlLabel label={label}
     control={<Checkbox checked={value === true} onChange={event => onValue(event.target.checked)} />} />;
   if (field.type === 'file') return <Stack spacing={0.5}>
-    <Button variant="outlined" component="label" sx={{ alignSelf: 'flex-start' }}>
+    <Button variant="outlined" component="label" tabIndex={-1} role={undefined} sx={{
+      alignSelf: 'flex-start',
+      '&:focus-within': { outline: '2px solid', outlineColor: 'primary.main', outlineOffset: 2 },
+    }}>
       {label}
       <input type="file" aria-label={label} accept={field.accept?.join(',')}
+        required={field.required} aria-invalid={Boolean(error)} aria-describedby={error ? errorId : undefined}
         style={{ position: 'absolute', width: 1, height: 1, opacity: 0 }}
         onChange={event => onFile(event.target.files?.[0])} />
     </Button>
     {file && <Typography variant="body2">{file.name} ({(file.size / 1024).toLocaleString('de-CH', { maximumFractionDigits: 1 })} KiB)</Typography>}
-    {error && <Typography variant="caption" color="error">{error}</Typography>}
+    {error && <Typography id={errorId} variant="caption" color="error">{error}</Typography>}
   </Stack>;
   return <TextField label={label} required={field.required} value={value ?? ''}
     select={field.type === 'enum'} multiline={field.type === 'multiline'}
@@ -184,7 +189,10 @@ function JobForm({ job }: { job: JobDetail }) {
       <Stack spacing={2}>{job.parameters.map(p => <Field key={p.name} field={p} value={values[p.name]}
         file={files[p.name]} error={errors[p.name]}
         onValue={value => setValues(previous => ({ ...previous, [p.name]: value }))}
-        onFile={file => setFiles(previous => ({ ...previous, [p.name]: file }))} />)}</Stack>
+        onFile={file => {
+          setFiles(previous => ({ ...previous, [p.name]: file }));
+          setErrors(previous => ({ ...previous, [p.name]: '' }));
+        }} />)}</Stack>
     </Box>
     {busy && <Stack spacing={1}>
       <Typography variant="body2">{uploading ? progress === null ? 'Upload läuft' : `Upload ${Math.floor(progress)} %` : 'Job wird gestartet'}</Typography>
