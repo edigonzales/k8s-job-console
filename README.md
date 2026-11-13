@@ -59,10 +59,9 @@ entfernt den Datenträger ausdrücklich.
 
 Der Seeder holt alle fünf Minuten den konfigurierten Jobs-Branch aus Git.
 **Jetzt synchronisieren** in Headlamp und `./scripts/deploy-jobs.sh` starten
-denselben Argo-Workflow. Die lokale Entwicklung verwendet den expliziten
-V2-Branch `feature/v2-job-console`, solange dieser separat abgenommen
-wird. `JOBS_REPOSITORY` und `JOBS_REF` lassen sich beim lokalen Start
-setzen. Für ein privates Repository kann das Secret `job-console-git`
+denselben Argo-Workflow. Die lokale Entwicklung verwendet standardmässig
+den Jobs-Branch `main`. Mit `JOBS_REPOSITORY` und `JOBS_REF` lassen sich
+Repository und Branch beim lokalen Start überschreiben. Für ein privates Repository kann das Secret `job-console-git`
 mit den schreibgeschützten Feldern `username` und `password` hinterlegt
 werden.
 

@@ -49,7 +49,7 @@ if [[ ${WEBHOOK_ENABLED:-false} == true ]]; then
 fi
 k create configmap job-console-sync --dry-run=client -o yaml \
   --from-literal=JOBS_REPOSITORY="${JOBS_REPOSITORY:-https://github.com/edigonzales/gretl-runtime-jobs.git}" \
-  --from-literal=JOBS_REF="${JOBS_REF:-feature/v2-job-console}" \
+  --from-literal=JOBS_REF="${JOBS_REF:-main}" \
   --from-literal=GRETL_IMAGE="$GRETL_IMAGE" --from-literal=NOTIFIER_IMAGE="$notifier_image" \
   --from-literal=GRETL_MAX_CPU_MILLICORES="${GRETL_MAX_CPU_MILLICORES:-2000}" \
   --from-literal=GRETL_MAX_MEMORY_MIB="${GRETL_MAX_MEMORY_MIB:-2048}" \

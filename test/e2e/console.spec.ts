@@ -162,9 +162,9 @@ test('configured Git source and manual synchronization are visible in Headlamp',
   await page.goto(pageRoot + '/deployment');
   await expect(page.getByRole('heading', { name: 'Bereitstellung' })).toBeVisible();
   await expect(page.getByText(/github\.com.*gretl-runtime-jobs/)).toBeVisible();
-  await expect(page.getByText(/feature\/v2-job-console · [a-f0-9]{40}/)).toBeVisible();
+  await expect(page.getByText(/^main · [a-f0-9]{40}$/)).toBeVisible();
   await page.getByRole('button', { name: 'Jetzt synchronisieren' }).click();
-  await expect(page.getByText(/Synchronized feature\/v2-job-console at [a-f0-9]{40}/)).toBeVisible({ timeout: 90_000 });
+  await expect(page.getByText(/Synchronized main at [a-f0-9]{40}/)).toBeVisible({ timeout: 90_000 });
 });
 
 
